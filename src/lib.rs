@@ -1,0 +1,67 @@
+//! Driver for the XY-series programmable buck converters
+//! (XY7025, XY6020L, XY6015, XY-SK60, XY-SK120, XY-SK120X).
+//!
+//! These modules share a common Modbus-RTU register layout — see the
+//! crate's `README.md` for the full protocol reference.
+//!
+//! ```ignore
+//! use xy_modbus::{Model, Xy, SafetyLimits};
+//!
+//! let mut xy = Xy::new(my_transport, Model::Xy7025);
+//! xy.set_protection(SafetyLimits { lvp_v: 22.0, ovp_v: 15.0, ocp_a: 15.0 })?;
+//! xy.set_voltage(13.5)?;
+//! xy.set_current_limit(10.0)?;
+//! xy.set_output(true)?;
+//!
+//! let s = xy.read_status()?;
+//! println!("{:.2} V @ {:.2} A", s.v_out, s.i_out);
+//! ```
+//!
+//! The crate is `no_std`. With the default `embedded-io` feature, the
+//! [`uart`] module provides a ready-to-use [`ModbusTransport`] over any
+//! `embedded-io` UART. To use a different transport, disable default
+//! features and implement [`ModbusTransport`] yourself; the [`framing`]
+//! module exposes the on-wire codec.
+//!
+//! For `esp-idf-hal` users, the `esp-idf-hal` feature ships a convenience
+//! constructor so you don't need to write a UART wrapper:
+//!
+//! ```ignore
+//! use xy_modbus::{Model, Xy};
+//!
+//! let mut xy = Xy::from_esp_uart(uart, Model::Xy7025);
+//! xy.set_voltage(13.5)?;
+//! ```
+
+#![no_std]
+
+// ─── Modules ─────────────────────────────────────────────────────────────────
+
+mod device;
+mod types;
+
+pub mod framing;
+pub(crate) mod regs;
+pub mod transport;
+
+#[cfg(feature = "embedded-io")]
+pub mod uart;
+
+// `esp-idf-hal` itself is target-conditional (only present when targeting
+// `target_os = "espidf"`), so this module is too — enabling the feature on
+// host builds is harmless.
+#[cfg(all(feature = "esp-idf-hal", target_os = "espidf"))]
+pub mod esp_idf;
+
+// ─── Re-exports ──────────────────────────────────────────────────────────────
+
+pub use device::Xy;
+pub use framing::FrameError;
+pub use transport::{BlockingRead, ModbusError, ModbusTransport, RtuError};
+pub use types::{
+    BaudRate, GroupParams, Model, ModelCheck, OnTime, ProtectionStatus, RegMode, SafetyLimits,
+    Setpoints, Status, TempUnit, Totals,
+};
+
+#[cfg(feature = "embedded-io")]
+pub use uart::UartTransport;

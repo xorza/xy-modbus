@@ -1,0 +1,32 @@
+[package]
+name = "xy-modbus"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "Modbus-RTU driver for the XY-series programmable buck converters (XY7025, XY6020L, XY6015, XY-SK60/120/120X)."
+keywords = ["xy7025", "xy6020", "modbus", "buck", "embedded"]
+categories = ["embedded", "no-std", "hardware-support"]
+readme = "README.md"
+repository = "https://github.com/xxorza/xy-modbus"
+documentation = "https://docs.rs/xy-modbus"
+
+[features]
+default = ["embedded-io"]
+defmt = ["dep:defmt"]
+serde = ["dep:serde"]
+embedded-io = ["dep:embedded-io", "dep:embedded-hal"]
+# Convenience constructor for esp-idf-hal `UartDriver`. Pulls in
+# esp-idf-hal only on `target_os = "espidf"` builds — enabling the
+# feature on host targets is a no-op so `cargo test --all-features`
+# still works.
+esp-idf-hal = ["embedded-io", "dep:esp-idf-hal"]
+
+[dependencies]
+defmt = { version = "1.0", optional = true }
+serde = { version = "1", default-features = false, features = ["derive"], optional = true }
+embedded-io = { version = "0.7", optional = true }
+embedded-hal = { version = "1.0", optional = true }
+
+[target.'cfg(target_os = "espidf")'.dependencies]
+esp-idf-hal = { version = "0.46", optional = true }
