@@ -179,6 +179,49 @@ application.
 See [`DATASHEET.md`](DATASHEET.md) for the full register map, CRC
 algorithm, wire-level examples, and known firmware quirks.
 
+## Examples
+
+### `examples/esp32c6-test/` — on-device test suite for XY7025
+
+A full sweep-test that exercises every public API method against a real
+XY7025, runnable on an ESP32-C6 via `esp-idf`. UART1 @ 115200 8N1 on
+GPIO16 (TX → XY RX) / GPIO17 (RX ← XY TX), shared GND.
+
+26 tests covering:
+
+- All live reads (status, setpoints, output V/I/P, V_IN, totals,
+  temperatures) cross-checked against each other.
+- Setpoint sweeps: 20 V values across 0–70 V, 14 I values across 0–25 A,
+  6 protection (LVP/OVP/OCP) combinations.
+- Output enable/disable plumbing (V_SET=0 / I_SET=0 first — disconnect
+  any sensitive load).
+- Front-panel registers (lock, backlight, sleep, buzzer, temp unit) with
+  sweep-and-restore.
+- Identity (model / version / `verify_model`), comms read-back, plus
+  same-value writes to slave-address / baud-rate to exercise the setter
+  codepaths without orphaning the bus.
+- Every M0–M9 memory group: probe-write → read-back → restore.
+- Constructor / destructor lifecycle: `into_transport` →
+  `Xy::with_slave` → `verify_model` on the rebuilt instance.
+- **Raw transport probes** for S-OTP, T-IN-OFFSET, SLEEP — these
+  bypass the driver's fixed-point conversion and call
+  `ModbusTransport` directly to document the firmware-side quirks
+  found while building this suite (S-OTP scale=1, T-OFFSET writes
+  silently dropped, SLEEP capped at 9 min).
+
+The suite snapshots every writable register at start and restores it at
+end, so it's safe to re-run on a unit you actually use.
+
+```sh
+cd examples/esp32c6-test
+./flash.sh           # cargo build --release && espflash flash --monitor
+```
+
+The example is a standalone Cargo project (its own
+`rust-toolchain.toml`, `sdkconfig.defaults`, `.cargo/config.toml`) and
+is not pulled into the parent crate's build — running `cargo test` /
+`cargo build` from the crate root ignores it.
+
 ## License
 
 MIT OR Apache-2.0.
