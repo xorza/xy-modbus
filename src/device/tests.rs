@@ -457,7 +457,7 @@ fn one_shot_getters_use_correct_addr_and_scale() {
         7u8
     );
     check!(REG_S_INI, 1, |x: &mut Xy<_>| x.read_power_on_output(), true);
-    check!(REG_MODEL, 0x6100, |x: &mut Xy<_>| x.read_model(), 0x6100u16);
+    check!(REG_MODEL, 0x6500, |x: &mut Xy<_>| x.read_model(), 0x6500u16);
     check!(REG_VERSION, 0x71, |x: &mut Xy<_>| x.read_version(), 0x71u16);
     check!(
         REG_T_IN_OFFSET,
@@ -546,25 +546,18 @@ fn temp_unit_round_trip() {
     assert_eq!(xy.read_temp_unit().unwrap(), TempUnit::Fahrenheit);
 }
 
-/// Both preset variants must report the documented XY6100-family scales
-/// (DATASHEET §3). `Custom` is verified separately in
-/// `custom_model_routes_user_supplied_scales`.
+/// XY7025 must report the documented family scales (DATASHEET §3).
+/// `Custom` is verified separately in `custom_model_routes_user_supplied_scales`.
 #[test]
 fn preset_models_match_datasheet_scales() {
-    // (model, current, power, opp)
-    let presets = [
-        (Model::Xy6020L, 100.0, 10.0, 1.0),
-        (Model::Xy7025, 100.0, 10.0, 1.0),
-    ];
-    for (m, i, p, o) in presets {
-        assert_eq!(m.current_scale(), i);
-        assert_eq!(m.power_scale(), p);
-        assert_eq!(m.opp_scale(), o);
-    }
+    let m = Model::Xy7025;
+    assert_eq!(m.current_scale(), 100.0);
+    assert_eq!(m.power_scale(), 10.0);
+    assert_eq!(m.opp_scale(), 1.0);
 }
 
 /// `Custom` with SK-style scales must use `opp_scale=10` (S-OPP raw stores
-/// 0.1 W units), distinct from XY7025/XY6020L which store whole watts.
+/// 0.1 W units), distinct from XY7025 which stores whole watts.
 #[test]
 fn group_encode_under_custom_sk_scales_uses_opp_scale_10() {
     // 18.0 W S-OPP → raw 180 with opp_scale=10, would be 18 on XY7025.
@@ -621,43 +614,25 @@ fn rtu_error_propagates() {
 
 #[test]
 fn verify_model_match_for_xy7025() {
-    // Configured Xy7025 (expected code 0x6100); device reports 0x6100 → Match.
+    // Configured Xy7025 (expected code 0x6500); device reports 0x6500 → Match.
     let mut xy = Xy::new(
         MockTransport::new(vec![Op::Read {
             addr: REG_MODEL,
-            values: vec![0x6100],
+            values: vec![0x6500],
         }]),
         Model::Xy7025,
     );
     assert_eq!(
         xy.verify_model().unwrap(),
         ModelCheck::Match {
-            device_code: 0x6100
-        }
-    );
-}
-
-#[test]
-fn verify_model_match_for_xy6020l() {
-    // 0x6100 is the documented family code for both XY6020L and XY7025.
-    let mut xy = Xy::new(
-        MockTransport::new(vec![Op::Read {
-            addr: REG_MODEL,
-            values: vec![0x6100],
-        }]),
-        Model::Xy6020L,
-    );
-    assert_eq!(
-        xy.verify_model().unwrap(),
-        ModelCheck::Match {
-            device_code: 0x6100
+            device_code: 0x6500
         }
     );
 }
 
 #[test]
 fn verify_model_mismatch_when_codes_differ() {
-    // Configured XY7025 (expected 0x6100) but device reports a foreign
+    // Configured XY7025 (expected 0x6500) but device reports a foreign
     // code → Mismatch (the dangerous case the API exists to surface).
     let mut xy = Xy::new(
         MockTransport::new(vec![Op::Read {
@@ -669,7 +644,7 @@ fn verify_model_mismatch_when_codes_differ() {
     assert_eq!(
         xy.verify_model().unwrap(),
         ModelCheck::Mismatch {
-            expected_code: 0x6100,
+            expected_code: 0x6500,
             device_code: 0x7700,
         }
     );
@@ -680,7 +655,7 @@ fn verify_model_inconclusive_for_custom() {
     let mut xy = Xy::new(
         MockTransport::new(vec![Op::Read {
             addr: REG_MODEL,
-            values: vec![0x6100],
+            values: vec![0x6500],
         }]),
         Model::Custom {
             current_scale: 100,
@@ -691,7 +666,7 @@ fn verify_model_inconclusive_for_custom() {
     assert_eq!(
         xy.verify_model().unwrap(),
         ModelCheck::Inconclusive {
-            device_code: 0x6100
+            device_code: 0x6500
         }
     );
 }

@@ -5,18 +5,14 @@
 /// I-SET, IOUT, S-OCP, POWER, S-OPP. See `DATASHEET.md` §3 for the
 /// scale table.
 ///
-/// Cross-check by reading `MODEL` (`0x0016`): `0x6100`-class is
-/// XY6020L / XY7025. The crate does not probe automatically — pick
-/// the variant that matches your hardware.
+/// Cross-check by reading `MODEL` (`0x0016`): `0x6500` is XY7025
+/// (newer firmware revision observed in 2024+ batches; older vendor
+/// docs cite `0x6100` for the same protocol). The crate does not
+/// probe automatically — pick the variant that matches your hardware.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Model {
-    /// Protocol-identical to [`Self::Xy7025`] (same scales, same `MODEL`
-    /// register code `0x6100`). Pick whichever matches the silkscreen on
-    /// your board — the crate treats them interchangeably.
-    Xy6020L,
-    /// Protocol-identical to [`Self::Xy6020L`].
     Xy7025,
     /// Escape hatch for hardware not covered by the preset variants.
     /// Each scale is the integer denominator the firmware uses on the
@@ -32,26 +28,26 @@ pub enum Model {
 }
 
 impl Model {
-    /// Scale for I-SET, IOUT, S-OCP. 100 on XY6020L/XY7025 (10 mA).
+    /// Scale for I-SET, IOUT, S-OCP. 100 on XY7025 (10 mA).
     pub const fn current_scale(self) -> f32 {
         match self {
-            Self::Xy6020L | Self::Xy7025 => 100.0,
+            Self::Xy7025 => 100.0,
             Self::Custom { current_scale, .. } => current_scale as f32,
         }
     }
 
-    /// Scale for POWER (`0x0004`). 10 on XY6020L/XY7025 (100 mW).
+    /// Scale for POWER (`0x0004`). 10 on XY7025 (100 mW).
     pub const fn power_scale(self) -> f32 {
         match self {
-            Self::Xy6020L | Self::Xy7025 => 10.0,
+            Self::Xy7025 => 10.0,
             Self::Custom { power_scale, .. } => power_scale as f32,
         }
     }
 
-    /// Scale for S-OPP in memory groups (`0x0055`). 1 W on XY6020L/XY7025.
+    /// Scale for S-OPP in memory groups (`0x0055`). 1 W on XY7025.
     pub const fn opp_scale(self) -> f32 {
         match self {
-            Self::Xy6020L | Self::Xy7025 => 1.0,
+            Self::Xy7025 => 1.0,
             Self::Custom { opp_scale, .. } => opp_scale as f32,
         }
     }
@@ -60,12 +56,10 @@ impl Model {
     /// this variant, if known. Used by [`crate::Xy::verify_model`] to
     /// catch wrong-scale-family misconfiguration.
     ///
-    /// `0x6100` is shared by XY6020L and XY7025 — they have identical
-    /// register scales, so the choice doesn't affect protocol behavior.
-    /// `Custom` returns `None` (no canonical code).
+    /// XY7025 returns `0x6500`. `Custom` returns `None` (no canonical code).
     pub const fn expected_model_code(self) -> Option<u16> {
         match self {
-            Self::Xy6020L | Self::Xy7025 => Some(0x6100),
+            Self::Xy7025 => Some(0x6500),
             Self::Custom { .. } => None,
         }
     }

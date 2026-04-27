@@ -61,7 +61,7 @@ pub const REG_TEMP_UNIT: u16 = 0x0013;
 pub const REG_BACKLIGHT: u16 = 0x0014;
 /// SLEEP — off-screen timeout in minutes.
 pub const REG_SLEEP: u16 = 0x0015;
-/// MODEL — product number (e.g. `0x6100`).
+/// MODEL — product number (e.g. `0x6500` on XY7025).
 pub const REG_MODEL: u16 = 0x0016;
 /// VERSION — firmware version (e.g. `0x0071`).
 pub const REG_VERSION: u16 = 0x0017;

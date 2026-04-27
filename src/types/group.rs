@@ -19,7 +19,7 @@ pub struct GroupParams {
     pub s_ovp_v: f32,
     pub s_ocp_a: f32,
     /// Over-power threshold in W. Resolution depends on model (1 W on
-    /// XY6020L/XY7025, 0.1 W on SK family) — encoded by [`super::Model::opp_scale`].
+    /// XY7025, 0.1 W on SK family) — encoded by [`super::Model::opp_scale`].
     pub s_opp_w: f32,
     /// Output-on time limit, hours.
     pub s_ohp_h: u16,

@@ -29,7 +29,11 @@ fn to_reg_i16(v: f32, scale: f32) -> u16 {
     assert!(!v.is_nan(), "to_reg_i16: NaN input");
     let scaled = v * scale;
     // Round-half-away-from-zero without pulling in libm's `round`.
-    let r = if scaled >= 0.0 { scaled + 0.5 } else { scaled - 0.5 } as i32;
+    let r = if scaled >= 0.0 {
+        scaled + 0.5
+    } else {
+        scaled - 0.5
+    } as i32;
     r.clamp(i16::MIN as i32, i16::MAX as i32) as i16 as u16
 }
 
@@ -315,7 +319,7 @@ impl<T: ModbusTransport> Xy<T> {
 
     // ─── Identity & comms config ─────────────────────────────────────────────
 
-    /// Product number (e.g. `0x6100`).
+    /// Product number (e.g. `0x6500` on XY7025).
     pub fn read_model(&mut self) -> Result<u16, RtuError> {
         self.read_one(REG_MODEL)
     }

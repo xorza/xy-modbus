@@ -1,5 +1,5 @@
-//! Driver for the XY-series programmable buck converters
-//! (XY7025, XY6020L, XY6015, XY-SK60, XY-SK120, XY-SK120X).
+//! Driver for the XY7025 programmable buck converter (and protocol-compatible
+//! siblings via `Model::Custom`).
 //!
 //! These modules share a common Modbus-RTU register layout — see the
 //! crate's `README.md` for the full protocol reference.
