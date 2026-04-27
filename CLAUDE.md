@@ -51,8 +51,50 @@ addresses.
 
 `types/` splits value types by concern: `enums` (BaudRate, ProtectionStatus,
 RegMode, TempUnit), `model` (Model + per-model scales), `status` (live
-readings, setpoints, safety limits, totals, on-time), `group` (M0–M9 memory
-group params).
+readings, setpoints, safety limits, totals, on-time, temperatures), `group`
+(M0–M9 memory group params).
+
+## On-device test example
+
+`examples/esp32c6-test/` is a standalone Cargo project (own
+`rust-toolchain.toml`, `sdkconfig.defaults`, `.cargo/config.toml`, separate
+`[workspace]`) that runs a 26-test sweep against a real XY7025 over UART1
+on an ESP32-C6 (GPIO16/17, 115200 8N1). It snapshots every writable
+register at start, sweeps every public API method (V/I/protection sweeps,
+output enable/disable, all M0–M9 groups, lifecycle via `into_transport` +
+`Xy::with_slave`), and restores the snapshot at end. Includes raw-transport
+probes for S-OTP / T-IN-OFFSET / SLEEP that document firmware-side quirks.
+
+Build/flash from inside that directory: `./flash.sh`. The example pulls
+`xy-modbus` via `path = "../.."` and is not picked up by the crate root's
+`cargo` commands.
+
+## Known XY7025 firmware quirks (verified empirically by `examples/esp32c6-test/`)
+
+These were discovered while running the on-device suite and are now
+encoded in the driver / datasheet — keep them in mind when extending:
+
+- **S-OTP scale is 1, not 10.** Raw register value equals the displayed
+  degrees in the unit selected by `F-C` (raw 95 with unit=°F is 95 °F).
+  The third-party tinkering4fun PDF's "scale 10" entry is wrong for this
+  firmware. `decode_group` / `encode_group` use scale=1; tests assert raw
+  95 → 95.0.
+- **Group writes (M0–M9) clamp S-OTP to 110 °C / 230 °F** in the current
+  display unit and apply firmware unit conversion that introduces ±1°
+  rounding. Single-register writes via `ModbusTransport::write_single_holding`
+  bypass both — they round-trip raw values exactly.
+- **T-IN/T-EX-OFFSET writes are silently ignored over Modbus.** Reads
+  work. The driver intentionally does not expose `set_temp_offset_*` —
+  use the front-panel calibration menu. Removed in
+  `device/mod.rs` with a "setters intentionally absent" comment so the
+  decision is discoverable.
+- **Backlight floor is 1, not 0.** Writing 0 reads back as 1 — the
+  display can't be fully extinguished via Modbus.
+- **SLEEP cap is 9 minutes.** Any write ≥10 reads back as 9. 0 disables.
+- **`Temperatures._external_unverified`** — the leading underscore is a
+  deliberate marker. We had no thermistor connected during bring-up, so
+  the decoding scale for a connected probe is unverified. Internal
+  sensor (`Temperatures.internal`) is verified.
 
 ## Project-specific conventions
 
