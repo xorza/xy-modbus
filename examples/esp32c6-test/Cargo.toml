@@ -27,3 +27,12 @@ esp-idf-hal = "*"
 
 [build-dependencies]
 embuild = "*"
+
+# crates.io esp-idf-sys 0.37.2 fails to generate bindings against
+# ESP-IDF v6.0 + clang 20 (stdio.h __FILE / mbedtls headers). The
+# upstream master branches and xorza's hal fork fix it; mirror what
+# ../../esp32-battery uses.
+[patch.crates-io]
+esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys.git", branch = "master" }
+esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git", branch = "master" }
+esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal.git", branch = "master" }
