@@ -8,7 +8,7 @@ description = "Modbus-RTU driver for the XY-series programmable buck converters 
 keywords = ["xy7025", "xy6020", "modbus", "buck", "embedded"]
 categories = ["embedded", "no-std", "hardware-support"]
 readme = "README.md"
-repository = "https://github.com/xxorza/xy-modbus"
+repository = "https://github.com/xorza/xy-modbus"
 documentation = "https://docs.rs/xy-modbus"
 
 [features]
