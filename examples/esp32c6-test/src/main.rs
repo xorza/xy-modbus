@@ -24,8 +24,8 @@ use esp_idf_hal::uart::config::Config;
 use esp_idf_hal::units::Hertz;
 
 use xy_modbus::{
-    BaudRate, GroupParams, Model, ModelCheck, ProtectionStatus, RegMode, RtuError, SafetyLimits,
-    Setpoints, TempUnit, Xy,
+    BaudRate, GroupParams, Model, ModelCheck, ModbusTransport, ProtectionStatus, RegMode,
+    RtuError, SafetyLimits, Setpoints, TempUnit, Xy,
 };
 
 const BAUD: u32 = 115200;
@@ -59,9 +59,13 @@ const PROT_SAMPLES: &[SafetyLimits] = &[
     SafetyLimits { lvp_v: 10.0, ovp_v: 72.00, ocp_a: 27.00 },
 ];
 
-const TEMP_OFFSET_SAMPLES: &[f32] = &[-9.9, -5.0, -1.5, -0.1, 0.0, 0.1, 1.5, 5.0, 9.9];
+// Firmware caps SLEEP at 9 minutes max (raw probe: any write ≥10 reads
+// back as 9). 0 = disabled.
+const SLEEP_SAMPLES: &[u16] = &[0, 1, 2, 5, 8, 9];
 
-const SLEEP_SAMPLES: &[u16] = &[0, 1, 2, 5, 10, 15, 30, 60];
+// Backlight: firmware clamps 0 → 1 (display always at least dim). Sweep
+// the accepted range only.
+const BACKLIGHT_SAMPLES: core::ops::RangeInclusive<u8> = 1..=5;
 
 fn main() {
     esp_idf_svc::sys::link_patches();
@@ -128,12 +132,15 @@ fn main() {
     run("reg_mode", test_reg_mode(&mut xy));
     run("temperatures", test_temperatures(&mut xy));
     run("temp_unit", test_temp_unit(&mut xy));
-    run("temp_offsets", test_temp_offsets(&mut xy));
+    run("temp_offsets_read_only", test_temp_offsets_read_only(&mut xy));
     run("lock", test_lock(&mut xy));
     run("backlight_full_range", test_backlight_full_range(&mut xy));
     run("sleep_minutes_sweep", test_sleep_minutes_sweep(&mut xy));
     run("buzzer", test_buzzer(&mut xy));
     run("comms_settings_read_only", test_comms_settings(&mut xy));
+    run("s_otp_raw_probe", test_s_otp_raw_probe(&mut xy));
+    run("temp_offset_raw_probe", test_temp_offset_raw_probe(&mut xy));
+    run("sleep_raw_probe", test_sleep_raw_probe(&mut xy));
     run("group_full_round_trip_all", test_group_full_round_trip_all(&mut xy));
     run("recall_each_group", test_recall_each_group(&mut xy));
 
@@ -162,8 +169,6 @@ struct Snapshot {
     power_on_output: bool,
     output_on: bool,
     temp_unit: TempUnit,
-    temp_offset_internal: f32,
-    temp_offset_external: f32,
     lock: bool,
     backlight: u8,
     sleep_minutes: u16,
@@ -195,8 +200,6 @@ fn snapshot_all<'d>(xy: &mut T<'d>) -> Result<Snapshot, String> {
         power_on_output: xy.read_power_on_output().map_err(rtu)?,
         output_on: xy.read_output().map_err(rtu)?,
         temp_unit: xy.read_temp_unit().map_err(rtu)?,
-        temp_offset_internal: xy.read_temp_offset_internal().map_err(rtu)?,
-        temp_offset_external: xy.read_temp_offset_external().map_err(rtu)?,
         lock: xy.read_lock().map_err(rtu)?,
         backlight: xy.read_backlight().map_err(rtu)?,
         sleep_minutes: xy.read_sleep_minutes().map_err(rtu)?,
@@ -220,8 +223,6 @@ fn restore_all<'d>(xy: &mut T<'d>, s: &Snapshot) -> Result<(), String> {
     xy.set_current_limit(s.setpoints.i_set).map_err(rtu)?;
     xy.set_power_on_output(s.power_on_output).map_err(rtu)?;
     xy.set_temp_unit(s.temp_unit).map_err(rtu)?;
-    xy.set_temp_offset_internal(s.temp_offset_internal).map_err(rtu)?;
-    xy.set_temp_offset_external(s.temp_offset_external).map_err(rtu)?;
     xy.set_lock(s.lock).map_err(rtu)?;
     xy.set_backlight(s.backlight).map_err(rtu)?;
     xy.set_sleep_minutes(s.sleep_minutes).map_err(rtu)?;
@@ -420,8 +421,11 @@ fn test_reg_mode(xy: &mut T) -> Result<(), String> {
 }
 
 fn test_temperatures(xy: &mut T) -> Result<(), String> {
-    let (internal, external) = xy.read_temperatures().map_err(rtu)?;
-    info!("  T_INT={internal:.1} T_EXT={external:.1}");
+    let t = xy.read_temperatures().map_err(rtu)?;
+    info!(
+        "  T_INT={:.1} T_EXT={:.1} (external unverified — sentinel ~888.8 means no probe)",
+        t.internal, t._external_unverified,
+    );
     Ok(())
 }
 
@@ -433,22 +437,13 @@ fn test_temp_unit(xy: &mut T) -> Result<(), String> {
     Ok(())
 }
 
-fn test_temp_offsets(xy: &mut T) -> Result<(), String> {
-    for &v in TEMP_OFFSET_SAMPLES {
-        xy.set_temp_offset_internal(v).map_err(rtu)?;
-        expect_approx(
-            &format!("T_INT_OFFSET={v:.1}"),
-            v,
-            xy.read_temp_offset_internal().map_err(rtu)?,
-        )?;
-        xy.set_temp_offset_external(v).map_err(rtu)?;
-        expect_approx(
-            &format!("T_EXT_OFFSET={v:.1}"),
-            v,
-            xy.read_temp_offset_external().map_err(rtu)?,
-        )?;
-    }
-    info!("  swept {} temp offsets", TEMP_OFFSET_SAMPLES.len());
+fn test_temp_offsets_read_only(xy: &mut T) -> Result<(), String> {
+    // Driver no longer exposes setters (firmware silently ignores them);
+    // confirm the read path works for both offset registers. The raw
+    // probe below covers the firmware no-op behavior at the wire level.
+    let int_off = xy.read_temp_offset_internal().map_err(rtu)?;
+    let ext_off = xy.read_temp_offset_external().map_err(rtu)?;
+    info!("  T_INT_OFFSET={int_off:.1} T_EXT_OFFSET={ext_off:.1}");
     Ok(())
 }
 
@@ -461,10 +456,16 @@ fn test_lock(xy: &mut T) -> Result<(), String> {
 }
 
 fn test_backlight_full_range(xy: &mut T) -> Result<(), String> {
-    // B-LED documented range 0..=5.
-    for level in 0u8..=5 {
+    // Firmware clamps 0 → 1, so the accepted range is 1..=5.
+    for level in BACKLIGHT_SAMPLES {
         xy.set_backlight(level).map_err(rtu)?;
         expect_eq(&format!("BL={level}"), level, xy.read_backlight().map_err(rtu)?)?;
+    }
+    // Confirm the documented quirk: writing 0 reads back as 1.
+    xy.set_backlight(0).map_err(rtu)?;
+    let after_zero = xy.read_backlight().map_err(rtu)?;
+    if after_zero != 1 {
+        return Err(format!("BL=0 expected firmware-clamp to 1, got {after_zero}"));
     }
     Ok(())
 }
@@ -474,7 +475,13 @@ fn test_sleep_minutes_sweep(xy: &mut T) -> Result<(), String> {
         xy.set_sleep_minutes(m).map_err(rtu)?;
         expect_eq(&format!("SLEEP={m}"), m, xy.read_sleep_minutes().map_err(rtu)?)?;
     }
-    info!("  swept {} sleep values", SLEEP_SAMPLES.len());
+    // Confirm the documented ceiling: anything ≥10 should clamp to 9.
+    xy.set_sleep_minutes(60).map_err(rtu)?;
+    let clamped = xy.read_sleep_minutes().map_err(rtu)?;
+    if clamped != 9 {
+        return Err(format!("SLEEP=60 expected firmware-clamp to 9, got {clamped}"));
+    }
+    info!("  swept {} sleep values + verified 9-min ceiling", SLEEP_SAMPLES.len());
     Ok(())
 }
 
@@ -504,7 +511,113 @@ fn test_comms_settings(xy: &mut T) -> Result<(), String> {
     Ok(())
 }
 
+/// Empirical probe to settle the S-OTP scale ambiguity. Bypasses the
+/// driver's fixed-point conversion and writes raw register values
+/// directly so we can see exactly what the firmware accepts/clamps.
+///
+/// Pre-conditions: temp unit set to Celsius (eliminates the F/C confound
+/// during interpretation). M0's S-OTP raw value is snapshotted and
+/// restored at the end.
+fn test_s_otp_raw_probe(xy: &mut T) -> Result<(), String> {
+    const REG_S_OTP_M0: u16 = 0x005C;
+
+    // Capture the unit the device was *originally* in — the snapshot's
+    // s_otp raw must be interpreted in that unit.
+    let original_unit = xy.read_temp_unit().map_err(rtu)?;
+    info!("  device unit at probe start: {original_unit:?}");
+
+    let slave = xy.slave();
+
+    let mut original = [0u16; 1];
+    xy.transport()
+        .read_holding(slave, REG_S_OTP_M0, &mut original)
+        .map_err(rtu)?;
+    info!(
+        "  S-OTP M0 raw original = {} (in {original_unit:?})",
+        original[0]
+    );
+
+    // Cover the full plausible range: tiny, mid, datasheet default,
+    // datasheet max, and several over-max values to learn the clamp.
+    let probes: &[u16] = &[10, 50, 80, 95, 100, 110, 150, 200, 230, 500, 950, 1100];
+
+    for unit in [TempUnit::Celsius, TempUnit::Fahrenheit] {
+        xy.set_temp_unit(unit).map_err(rtu)?;
+        info!("  --- probing in {unit:?} ---");
+        let t = xy.transport();
+        for &raw in probes {
+            t.write_single_holding(slave, REG_S_OTP_M0, raw)
+                .map_err(rtu)?;
+            let mut got = [0u16; 1];
+            t.read_holding(slave, REG_S_OTP_M0, &mut got).map_err(rtu)?;
+            info!("    S-OTP write raw {raw:>4} -> read raw {}", got[0]);
+        }
+    }
+
+    // Restore unit and raw.
+    xy.set_temp_unit(original_unit).map_err(rtu)?;
+    xy.transport()
+        .write_single_holding(slave, REG_S_OTP_M0, original[0])
+        .map_err(rtu)?;
+    let mut verify = [0u16; 1];
+    xy.transport()
+        .read_holding(slave, REG_S_OTP_M0, &mut verify)
+        .map_err(rtu)?;
+    expect_eq("S-OTP restore", original[0], verify[0])
+}
+
+/// Probe the raw scale/range of T-IN-OFFSET. Driver currently uses
+/// scale=10 (i.e. 0.1° units). If raw 1 round-trips, scale=10 is right
+/// and firmware just rounds 0.1° to "1 sub-unit". If raw 1 reads back
+/// as 0, the firmware doesn't accept sub-degree resolution.
+fn test_temp_offset_raw_probe(xy: &mut T) -> Result<(), String> {
+    const REG_T_IN_OFFSET: u16 = 0x001A;
+    let slave = xy.slave();
+    let t = xy.transport();
+    let mut original = [0u16; 1];
+    t.read_holding(slave, REG_T_IN_OFFSET, &mut original).map_err(rtu)?;
+    info!("  T-IN-OFFSET raw original = {}", original[0]);
+
+    let probes: &[u16] = &[0, 1, 2, 5, 10, 50, 100];
+    for &raw in probes {
+        t.write_single_holding(slave, REG_T_IN_OFFSET, raw).map_err(rtu)?;
+        let mut got = [0u16; 1];
+        t.read_holding(slave, REG_T_IN_OFFSET, &mut got).map_err(rtu)?;
+        info!("    T-IN-OFFSET write raw {raw:>3} -> read raw {}", got[0]);
+    }
+
+    t.write_single_holding(slave, REG_T_IN_OFFSET, original[0]).map_err(rtu)?;
+    Ok(())
+}
+
+/// Probe the raw range of SLEEP. Failure mode in earlier runs was
+/// "write 10/15, read back 9". Either firmware caps at 9, or there's
+/// some encoding quirk.
+fn test_sleep_raw_probe(xy: &mut T) -> Result<(), String> {
+    const REG_SLEEP: u16 = 0x0015;
+    let slave = xy.slave();
+    let t = xy.transport();
+    let mut original = [0u16; 1];
+    t.read_holding(slave, REG_SLEEP, &mut original).map_err(rtu)?;
+    info!("  SLEEP raw original = {}", original[0]);
+
+    let probes: &[u16] = &[0, 1, 5, 8, 9, 10, 11, 15, 30, 60, 100, 999];
+    for &raw in probes {
+        t.write_single_holding(slave, REG_SLEEP, raw).map_err(rtu)?;
+        thread::sleep(Duration::from_millis(50));
+        let mut got = [0u16; 1];
+        t.read_holding(slave, REG_SLEEP, &mut got).map_err(rtu)?;
+        info!("    SLEEP write raw {raw:>3} -> read raw {}", got[0]);
+    }
+
+    t.write_single_holding(slave, REG_SLEEP, original[0]).map_err(rtu)?;
+    Ok(())
+}
+
 fn test_group_full_round_trip_all(xy: &mut T) -> Result<(), String> {
+    // Force Celsius so any temp-unit-dependent encoding doesn't
+    // contaminate the s_otp readback comparison.
+    xy.set_temp_unit(TempUnit::Celsius).map_err(rtu)?;
     // Write a unique probe to every M0..=M9, read back, verify, restore.
     for n in 0u8..=9 {
         let original = xy.read_group(n).map_err(rtu)?;
@@ -519,7 +632,10 @@ fn test_group_full_round_trip_all(xy: &mut T) -> Result<(), String> {
             s_ohp_m: n as u16 * 5,
             s_oah_ah: 1.0 + n as f32,
             s_owh_wh: 10.0 + n as f32 * 2.0,
+            // Stay ≤ 110 — firmware clamps S-OTP to 110° in the current
+            // display unit on group writes. (Driver scale is 1.)
             s_otp: 50.0 + n as f32,
+            // (n=0..=9 => 50..=59, all within the 110° clamp.)
             power_on_output: n % 2 == 0,
         };
         xy.write_group(n, &probe).map_err(rtu)?;
@@ -534,7 +650,15 @@ fn test_group_full_round_trip_all(xy: &mut T) -> Result<(), String> {
         expect_eq(&format!("M{n} s_ohp_m"), probe.s_ohp_m, r.s_ohp_m)?;
         expect_approx(&format!("M{n} s_oah_ah"), probe.s_oah_ah, r.s_oah_ah)?;
         expect_approx(&format!("M{n} s_owh_wh"), probe.s_owh_wh, r.s_owh_wh)?;
-        expect_approx(&format!("M{n} s_otp"), probe.s_otp, r.s_otp)?;
+        // Group writes route through firmware unit conversion, which
+        // introduces ±1° rounding. Single-register writes round-trip
+        // exactly (see s_otp_raw_probe). Allow a 2° tolerance here.
+        if (probe.s_otp - r.s_otp).abs() > 2.0 {
+            return Err(format!(
+                "M{n} s_otp: expected {:.1} ±2, got {:.1}",
+                probe.s_otp, r.s_otp
+            ));
+        }
         expect_eq(&format!("M{n} power_on_output"), probe.power_on_output, r.power_on_output)?;
         // Restore immediately so a later failure doesn't leave M0..M9 trashed.
         xy.write_group(n, &original).map_err(rtu)?;

@@ -285,7 +285,7 @@ fn read_group_decodes_14_regs() {
             0,    // oah_h
             0,    // owh_l
             0,    // owh_h
-            950,  // s_otp (scale 10 → 95.0)
+            95,   // s_otp (scale 1 → 95.0; raw matches displayed °)
             0,    // s_ini
         ],
     }]);
@@ -318,7 +318,7 @@ fn write_group_round_trips_through_encode() {
     };
     let mock = MockTransport::new(vec![Op::WriteMany {
         addr: group_addr(2),
-        values: vec![1440, 1000, 1000, 1500, 1250, 1800, 0, 0, 0, 0, 0, 0, 950, 1],
+        values: vec![1440, 1000, 1000, 1500, 1250, 1800, 0, 0, 0, 0, 0, 0, 95, 1],
     }]);
     let mut xy = Xy::new(mock, Model::Xy7025);
     xy.write_group(2, &p).unwrap();
@@ -409,13 +409,6 @@ fn one_shot_setters_use_correct_addr_and_value() {
     check!(REG_BACKLIGHT, 3, |x: &mut Xy<_>| x.set_backlight(3));
     check!(REG_SLEEP, 12, |x: &mut Xy<_>| x.set_sleep_minutes(12));
     check!(REG_BUZZER, 1, |x: &mut Xy<_>| x.set_buzzer(true));
-    // -2.5 °C → -25 raw → 0xFFE7 as i16 two's complement.
-    check!(REG_T_IN_OFFSET, 0xFFE7, |x: &mut Xy<_>| x
-        .set_temp_offset_internal(-2.5));
-    check!(REG_T_IN_OFFSET, 15, |x: &mut Xy<_>| x
-        .set_temp_offset_internal(1.5));
-    check!(REG_T_EX_OFFSET, 20, |x: &mut Xy<_>| x
-        .set_temp_offset_external(2.0));
     check!(REG_SLAVE_ADDR, 7, |x: &mut Xy<_>| x.set_slave_address(7));
     check!(REG_S_INI, 1, |x: &mut Xy<_>| x.set_power_on_output(true));
     check!(REG_EXTRACT_M, 3, |x: &mut Xy<_>| x.recall_group(3));
@@ -515,7 +508,9 @@ fn one_shot_getters_use_correct_addr_and_scale() {
         }]),
         Model::Xy7025,
     );
-    assert_eq!(xy.read_temperatures().unwrap(), (34.5, 25.6));
+    let t = xy.read_temperatures().unwrap();
+    assert_eq!(t.internal, 34.5);
+    assert_eq!(t._external_unverified, 25.6);
 }
 
 #[test]

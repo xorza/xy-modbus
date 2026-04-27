@@ -144,14 +144,14 @@ physical value (so `1440` with scale `100` = `14.40 V`).
 | `0x0011` | CVCC        | Regulation mode (0=CV, 1=CC)           | —     | —     | R   |
 | `0x0012` | ONOFF       | Output enable (0=off, 1=on)            | —     | —     | R/W |
 | `0x0013` | F-C         | Temperature unit (0=°C, 1=°F)          | —     | —     | R/W |
-| `0x0014` | B-LED       | Backlight brightness (0–5)             | —     | —     | R/W |
-| `0x0015` | SLEEP       | Off-screen timeout                     | 1     | min   | R/W |
+| `0x0014` | B-LED       | Backlight brightness (1–5; firmware floors 0 → 1) | —     | —     | R/W |
+| `0x0015` | SLEEP       | Off-screen timeout (firmware caps at 9 min) | 1     | min   | R/W |
 | `0x0016` | MODEL       | Product number (e.g. `0x6100`)         | —     | —     | R   |
 | `0x0017` | VERSION     | Firmware version (e.g. `0x0071`)       | —     | —     | R   |
 | `0x0018` | SLAVE-ADD   | Modbus slave address; takes effect after device reset | — | — | R/W |
 | `0x0019` | BAUDRATE_L  | Baud-rate code (see §3.6)              | —     | —     | R/W |
-| `0x001A` | T-IN-OFFSET | Internal-temp calibration offset       | 10    | °C/°F | R/W |
-| `0x001B` | T-EX-OFFSET | External-temp calibration offset       | 10    | °C/°F | R/W |
+| `0x001A` | T-IN-OFFSET | Internal-temp calibration offset (XY7025: writes silently ignored over Modbus — front-panel only) | 10    | °C/°F | R   |
+| `0x001B` | T-EX-OFFSET | External-temp calibration offset (XY7025: writes silently ignored over Modbus — front-panel only) | 10    | °C/°F | R   |
 | `0x001C` | BUZZER      | Buzzer enable (often unimplemented)    | —     | —     | R/W |
 | `0x001D` | EXTRACT-M   | Recall memory group (write 0–9)        | —     | —     | R/W |
 | `0x001E` | DEVICE      | Device status — unreliable on some FW  | —     | —     | R/W |
@@ -207,17 +207,19 @@ and the power-on-output behavior.
 | `0x0059` | S-OAH_H | Max output charge, high 16 bits                   | —     | Ah   | R/W |
 | `0x005A` | S-OWH_L | Max output energy, low 16 bits (10 mWh units)     | 100   | Wh   | R/W |
 | `0x005B` | S-OWH_H | Max output energy, high 16 bits (10 mWh units)    | —     | Wh   | R/W |
-| `0x005C` | S-OTP   | Over-temperature protection (see scale note below) | 10    | °C/°F | R/W |
+| `0x005C` | S-OTP   | Over-temperature protection (raw value = displayed °, see note below) | 1     | °C/°F | R/W |
 | `0x005D` | S-INI   | Power-on output state (0=off, 1=on, persists in EEPROM) | — | — | R/W |
 
-> **S-OTP scale ambiguity.** The tinkering4fun PDF (p.5) lists S-OTP at
-> scale 10 (0.1 °C resolution). The csvke SK120 register PDF (p.2) lists
-> it at scale 1 (whole degrees), and Jens Gleissberg's example in
-> `jens3382-README.md:182` writes raw `110` for what reads like 110 °C —
-> consistent with scale 1. This may be a model divergence (XY6020L /10
-> vs SK family /1) or a documentation inconsistency. Verify on your
-> hardware before relying on the absolute threshold; round-trip
-> (read → write → read) survives either interpretation.
+> **S-OTP scale (resolved empirically on XY7025).** Storage is unscaled:
+> the raw register value equals the displayed degrees in the unit
+> selected by `F-C` (raw 95 with unit=°F is 95 °F; raw 110 with unit=°C
+> is 110 °C). This was verified on real hardware by writing every value
+> in `[10, 1100]` via single-register writes — all round-tripped
+> identically in both °C and °F mode. The tinkering4fun PDF's "scale 10"
+> entry is wrong for this firmware; the csvke / Jens-Gleissberg "scale 1"
+> reading is correct. Note: `write_multiple` (group writes) routes
+> through firmware unit conversion which clamps to 110 °C / 230 °F and
+> introduces ±1° rounding — single-register writes do neither.
 
 ### 3.5 Memory groups M0–M9 (`0x0050 + N × 0x0010`)
 

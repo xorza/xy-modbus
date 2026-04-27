@@ -147,7 +147,7 @@ frames and ~500 ms response window; see [`DATASHEET.md`](DATASHEET.md)
   `read_reg_mode`
 - **Front panel & misc** — `read/set_lock`, `read/set_backlight`,
   `read/set_sleep_minutes`, `read/set_buzzer`,
-  `read/set_temp_unit`, `read/set_temp_offset_*`
+  `read/set_temp_unit`, `read_temp_offset_*`
 - **Identity & comms** — `read_model`, `verify_model`, `read_version`,
   `read/set_slave_address`, `read/set_baud_rate`
 - **Memory groups (M0–M9)** — `read_group(n)`, `write_group(n, &p)`,

@@ -60,7 +60,7 @@ pub use framing::FrameError;
 pub use transport::{BlockingRead, ModbusError, ModbusTransport, RtuError};
 pub use types::{
     BaudRate, GroupParams, Model, ModelCheck, OnTime, ProtectionStatus, RegMode, SafetyLimits,
-    Setpoints, Status, TempUnit, Totals,
+    Setpoints, Status, TempUnit, Temperatures, Totals,
 };
 
 #[cfg(feature = "embedded-io")]

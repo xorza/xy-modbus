@@ -75,6 +75,27 @@ pub struct Totals {
     pub on_time: OnTime,
 }
 
+// ─── Temperatures ────────────────────────────────────────────────────────────
+
+/// Temperature readings from registers `0x000D` (T-IN) and `0x000E` (T-EX),
+/// in the unit selected by [`super::TempUnit`].
+///
+/// `internal` is the on-board sensor — verified on XY7025 hardware.
+///
+/// `_external_unverified` is the optional external probe input. With no
+/// thermistor connected the field reads `888.8` as a sentinel; the
+/// decoding scale for a *connected* probe has not been verified on real
+/// hardware. The leading underscore is a deliberate marker — treat the
+/// value as advisory until you've cross-checked it against a known
+/// reference temperature on your unit.
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Temperatures {
+    pub internal: f32,
+    pub _external_unverified: f32,
+}
+
 // ─── SafetyLimits ────────────────────────────────────────────────────────────
 
 /// Hard trip limits programmed into the buck's protection registers.

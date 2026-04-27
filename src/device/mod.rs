@@ -5,7 +5,7 @@ use crate::regs::*;
 use crate::transport::{ModbusTransport, RtuError};
 use crate::types::{
     BaudRate, GroupParams, Model, ModelCheck, OnTime, ProtectionStatus, RegMode, SafetyLimits,
-    Setpoints, Status, TempUnit, Totals,
+    Setpoints, Status, TempUnit, Temperatures, Totals,
 };
 
 // Fixed-point conversion. Inputs are clamped to u16 — caller is responsible
@@ -25,18 +25,6 @@ fn from_reg_u16(raw: u16, scale: f32) -> f32 {
 // Signed variants for registers the firmware encodes as i16 two's
 // complement (currently only the temperature calibration offsets at
 // 0x001A / 0x001B — both can legitimately be negative).
-fn to_reg_i16(v: f32, scale: f32) -> u16 {
-    assert!(!v.is_nan(), "to_reg_i16: NaN input");
-    let scaled = v * scale;
-    // Round-half-away-from-zero without pulling in libm's `round`.
-    let r = if scaled >= 0.0 {
-        scaled + 0.5
-    } else {
-        scaled - 0.5
-    } as i32;
-    r.clamp(i16::MIN as i32, i16::MAX as i32) as i16 as u16
-}
-
 fn from_reg_i16(raw: u16, scale: f32) -> f32 {
     raw as i16 as f32 / scale
 }
@@ -256,12 +244,16 @@ impl<T: ModbusTransport> Xy<T> {
 
     // ─── Temperatures ────────────────────────────────────────────────────────
 
-    /// Returns `(internal, external)` in the unit selected by
-    /// [`Self::read_temp_unit`].
-    pub fn read_temperatures(&mut self) -> Result<(f32, f32), RtuError> {
+    /// Both fields are in the unit selected by [`Self::read_temp_unit`].
+    /// See [`Temperatures`] for caveats on the external field — its
+    /// decoding scale is unverified on real hardware.
+    pub fn read_temperatures(&mut self) -> Result<Temperatures, RtuError> {
         let mut r = [0u16; 2];
         self.transport.read_holding(self.slave, REG_T_IN, &mut r)?;
-        Ok((from_reg_u16(r[0], 10.0), from_reg_u16(r[1], 10.0)))
+        Ok(Temperatures {
+            internal: from_reg_u16(r[0], 10.0),
+            _external_unverified: from_reg_u16(r[1], 10.0),
+        })
     }
 
     pub fn read_temp_unit(&mut self) -> Result<TempUnit, RtuError> {
@@ -274,15 +266,14 @@ impl<T: ModbusTransport> Xy<T> {
     pub fn read_temp_offset_internal(&mut self) -> Result<f32, RtuError> {
         Ok(from_reg_i16(self.read_one(REG_T_IN_OFFSET)?, 10.0))
     }
-    pub fn set_temp_offset_internal(&mut self, offset: f32) -> Result<(), RtuError> {
-        self.write_one(REG_T_IN_OFFSET, to_reg_i16(offset, 10.0))
-    }
     pub fn read_temp_offset_external(&mut self) -> Result<f32, RtuError> {
         Ok(from_reg_i16(self.read_one(REG_T_EX_OFFSET)?, 10.0))
     }
-    pub fn set_temp_offset_external(&mut self, offset: f32) -> Result<(), RtuError> {
-        self.write_one(REG_T_EX_OFFSET, to_reg_i16(offset, 10.0))
-    }
+    // Setters intentionally absent: XY7025 firmware silently ignores
+    // Modbus writes to T-IN/T-EX offset (verified empirically — every
+    // non-zero raw write reads back as 0). The offset can only be
+    // changed from the front-panel calibration menu, so a Modbus setter
+    // would lie about success. Use the front panel instead.
 
     // ─── Front panel & misc ──────────────────────────────────────────────────
 
@@ -297,6 +288,9 @@ impl<T: ModbusTransport> Xy<T> {
     pub fn read_backlight(&mut self) -> Result<u8, RtuError> {
         Ok(self.read_one(REG_BACKLIGHT)? as u8)
     }
+    /// Set backlight brightness. Documented range is 0–5, but XY7025
+    /// firmware floors writes at 1 (writing 0 reads back as 1) — the
+    /// display can't be fully extinguished via Modbus.
     pub fn set_backlight(&mut self, level: u8) -> Result<(), RtuError> {
         self.write_one(REG_BACKLIGHT, level as u16)
     }
@@ -305,6 +299,9 @@ impl<T: ModbusTransport> Xy<T> {
     pub fn read_sleep_minutes(&mut self) -> Result<u16, RtuError> {
         self.read_one(REG_SLEEP)
     }
+    /// Set off-screen timeout in minutes. XY7025 firmware caps the
+    /// stored value at 9; any write ≥10 reads back as 9. Pass 0 to
+    /// disable auto-off.
     pub fn set_sleep_minutes(&mut self, minutes: u16) -> Result<(), RtuError> {
         self.write_one(REG_SLEEP, minutes)
     }
@@ -452,7 +449,13 @@ fn decode_group(r: &[u16; GROUP_LEN as usize], model: Model) -> GroupParams {
         s_ohp_m,
         s_oah_ah: from_reg_u32(s_oah_low, s_oah_high, 1000.0),
         s_owh_wh: from_reg_u32(s_owh_low, s_owh_high, 100.0),
-        s_otp: from_reg_u16(s_otp, 10.0),
+        // S-OTP storage is unscaled on XY7025 firmware: raw register
+        // value equals the displayed degrees in the current temp unit
+        // (raw 95 with unit=°F is 95°F; raw 110 with unit=°C is 110°C).
+        // Empirically verified: raw 10..=1100 round-trips identically in
+        // both C and F via single-register writes. The third-party
+        // tinkering4fun datasheet's "scale 10" entry is wrong.
+        s_otp: from_reg_u16(s_otp, 1.0),
         power_on_output: s_ini != 0,
     }
 }
@@ -474,7 +477,7 @@ fn encode_group(p: &GroupParams, model: Model) -> [u16; GROUP_LEN as usize] {
         oah_high,
         owh_low,
         owh_high,
-        to_reg_u16(p.s_otp, 10.0),
+        to_reg_u16(p.s_otp, 1.0),
         p.power_on_output as u16,
     ]
 }
