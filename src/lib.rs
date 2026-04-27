@@ -4,7 +4,16 @@
 //! These modules share a common Modbus-RTU register layout — see the
 //! crate's `README.md` for the full protocol reference.
 //!
-//! ```ignore
+//! ```no_run
+//! # use xy_modbus::{ModbusTransport, RtuError};
+//! # struct MyTransport;
+//! # impl ModbusTransport for MyTransport {
+//! #     fn read_holding(&mut self, _: u8, _: u16, _: &mut [u16]) -> Result<(), RtuError> { unimplemented!() }
+//! #     fn write_single_holding(&mut self, _: u8, _: u16, _: u16) -> Result<(), RtuError> { unimplemented!() }
+//! #     fn write_multiple_holdings(&mut self, _: u8, _: u16, _: &[u16]) -> Result<(), RtuError> { unimplemented!() }
+//! # }
+//! # fn main() -> Result<(), RtuError> {
+//! # let my_transport = MyTransport;
 //! use xy_modbus::{Model, Xy, SafetyLimits};
 //!
 //! let mut xy = Xy::new(my_transport, Model::Xy7025);
@@ -15,6 +24,8 @@
 //!
 //! let s = xy.read_status()?;
 //! println!("{:.2} V @ {:.2} A", s.v_out, s.i_out);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! The crate is `no_std`. With the default `embedded-io` feature, the
