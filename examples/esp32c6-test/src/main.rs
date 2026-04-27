@@ -121,7 +121,6 @@ fn main() {
 
     run("identity", test_identity(&mut xy));
     run("status_consistency", test_status_consistency(&mut xy));
-    run("live_readings", test_live_readings(&mut xy));
     run("totals", test_totals(&mut xy));
     run("voltage_sweep", test_voltage_sweep(&mut xy));
     run("current_sweep", test_current_sweep(&mut xy));
@@ -138,6 +137,8 @@ fn main() {
     run("sleep_minutes_sweep", test_sleep_minutes_sweep(&mut xy));
     run("buzzer", test_buzzer(&mut xy));
     run("comms_settings_read_only", test_comms_settings(&mut xy));
+    run("comms_setters_idempotent", test_comms_setters_idempotent(&mut xy));
+    run("model_accessor", test_model_accessor(&mut xy));
     run("s_otp_raw_probe", test_s_otp_raw_probe(&mut xy));
     run("temp_offset_raw_probe", test_temp_offset_raw_probe(&mut xy));
     run("sleep_raw_probe", test_sleep_raw_probe(&mut xy));
@@ -148,6 +149,21 @@ fn main() {
     match restore_all(&mut xy, &snapshot) {
         Ok(()) => info!("snapshot restored"),
         Err(e) => error!("snapshot restore FAILED: {e}"),
+    }
+
+    // Terminal test: exercises the constructor/destructor lifecycle —
+    // `into_transport` (consumes `xy`) followed by `with_slave` to
+    // rebuild on the same UART. Must run last because it moves `xy`.
+    let lifecycle = test_lifecycle(xy);
+    match &lifecycle {
+        Ok(()) => {
+            info!("PASS  lifecycle");
+            pass += 1;
+        }
+        Err(e) => {
+            error!("FAIL  lifecycle: {e}");
+            fail += 1;
+        }
     }
 
     info!("=== xy-modbus on-device test complete: {pass} passed, {fail} failed ===");
@@ -302,14 +318,8 @@ fn test_status_consistency(xy: &mut T) -> Result<(), String> {
         "  status: V_SET={:.2} I_SET={:.2} V_OUT={:.2} I_OUT={:.3} P_OUT={:.2} V_IN={:.2} prot={} reg={:?} on={}",
         s.v_set, s.i_set, s.v_out, s.i_out, s.p_out, s.v_in, s.protection, s.reg_mode, s.output_on,
     );
-    Ok(())
-}
-
-fn test_live_readings(xy: &mut T) -> Result<(), String> {
-    let v_in = xy.read_voltage_in().map_err(rtu)?;
-    info!("  V_IN={v_in:.2}");
-    if v_in < 1.0 {
-        return Err(format!("V_IN={v_in:.2} — is the buck powered?"));
+    if s.v_in < 1.0 {
+        return Err(format!("V_IN={:.2} — is the buck powered?", s.v_in));
     }
     Ok(())
 }
@@ -507,6 +517,60 @@ fn test_comms_settings(xy: &mut T) -> Result<(), String> {
     }
     if !matches!(baud, BaudRate::B115200) {
         warn!("  device baud is {baud:?}, not B115200 — UART would normally be misconfigured");
+    }
+    Ok(())
+}
+
+/// Exercises `set_slave_address` and `set_baud_rate` codepaths safely
+/// by writing the current value back. Both registers only take effect
+/// after device reset, so a same-value write is fully idempotent and
+/// can't orphan the bus mid-test.
+fn test_comms_setters_idempotent(xy: &mut T) -> Result<(), String> {
+    let slave = xy.read_slave_address().map_err(rtu)?;
+    xy.set_slave_address(slave).map_err(rtu)?;
+    expect_eq(
+        "SLAVE same-value round-trip",
+        slave,
+        xy.read_slave_address().map_err(rtu)?,
+    )?;
+
+    let baud = xy.read_baud_rate().map_err(rtu)?;
+    if matches!(baud, BaudRate::Unknown(_)) {
+        return Err(format!("device baud decoded as {baud:?}; refusing to write back"));
+    }
+    xy.set_baud_rate(baud).map_err(rtu)?;
+    expect_eq(
+        "BAUD same-value round-trip",
+        baud,
+        xy.read_baud_rate().map_err(rtu)?,
+    )?;
+    Ok(())
+}
+
+fn test_model_accessor(xy: &mut T) -> Result<(), String> {
+    expect_eq("Xy::model()", PACK_MODEL, xy.model())
+}
+
+/// Drains `xy` via `into_transport`, rebuilds via `with_slave` on the
+/// same UART transport, and confirms the rebuilt instance can still
+/// talk to the device. Consumes `xy` — must run last.
+fn test_lifecycle(xy: T<'static>) -> Result<(), String> {
+    let original_slave = xy.slave();
+    let model = xy.model();
+
+    // Drain.
+    let transport = xy.into_transport();
+
+    // Rebuild with explicit slave (using the device's actual slave so
+    // the verify call below succeeds).
+    let mut rebuilt: T<'static> = Xy::with_slave(transport, model, original_slave);
+    expect_eq("rebuilt slave", original_slave, rebuilt.slave())?;
+    expect_eq("rebuilt model", model, rebuilt.model())?;
+
+    // Final round-trip on the rebuilt instance.
+    let check = rebuilt.verify_model().map_err(rtu)?;
+    if !matches!(check, ModelCheck::Match { .. }) {
+        return Err(format!("rebuilt verify_model: {check:?}"));
     }
     Ok(())
 }
