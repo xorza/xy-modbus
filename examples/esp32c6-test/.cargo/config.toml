@@ -1,0 +1,14 @@
+[build]
+target = "riscv32imac-esp-espidf"
+
+[target.riscv32imac-esp-espidf]
+linker = "ldproxy"
+rustflags = ["--cfg", "espidf_time64"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+MCU = { value = "esp32c6", relative = false }
+ESP_IDF_VERSION = "v6.0"
+ESP_IDF_TOOLS_INSTALL_DIR = "global"

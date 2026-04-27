@@ -1,0 +1,29 @@
+[package]
+name = "xy-modbus-esp32c6-test"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "xy-modbus-esp32c6-test"
+harness = false
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+# Standalone workspace so this example is not pulled in by the parent
+# xy-modbus crate when running its own cargo commands.
+[workspace]
+
+[dependencies]
+xy-modbus = { path = "../..", features = ["esp-idf-hal"] }
+log = "*"
+esp-idf-svc = "*"
+esp-idf-hal = "*"
+
+[build-dependencies]
+embuild = "*"
