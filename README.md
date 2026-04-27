@@ -7,6 +7,12 @@ Modbus-RTU driver for the XY-series programmable buck converters
 share a common register layout — the differences between models are
 mechanical (max V/A/W), not protocol.
 
+> **Hardware verification:** only the XY7025 has been tested against
+> real hardware (see `examples/esp32c6-test/`). The other models are
+> supported on the basis of the shared register layout documented by
+> third-party reverse engineering, but are **unverified** — use
+> `Model::Custom` and report back if you try one.
+
 `no_std`, no required dependencies. Bring your own UART transport, or
 opt in to the bundled one (default `embedded-io` feature) or the
 `esp-idf-hal` glue.

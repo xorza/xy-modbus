@@ -5,13 +5,18 @@ edition = "2024"
 rust-version = "1.85"
 authors = ["xxorza <xxorza@gmail.com>"]
 license = "MIT OR Apache-2.0"
-description = "Modbus-RTU driver for the XY7025 programmable buck converter."
+description = "Modbus-RTU driver for XY-series programmable buck converters (XY6020L, XY6015, XY-SK60/120/120X). Only tested on real XY7025 hardware; other models share the register layout but are unverified."
 homepage = "https://github.com/xorza/xy-modbus"
 keywords = ["xy7025", "modbus", "buck", "embedded"]
 categories = ["embedded", "no-std", "hardware-support"]
 readme = "README.md"
 repository = "https://github.com/xorza/xy-modbus"
 documentation = "https://docs.rs/xy-modbus"
+exclude = [
+    "docs-archive/*",
+    "CLAUDE.md",
+    "examples/*",
+]
 
 [features]
 default = ["embedded-io"]
