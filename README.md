@@ -1,6 +1,6 @@
 # xy-modbus
 
-<img src="docs/xy7025.jpg" alt="XY7025 board" width="400">
+<img src="docs/XY7025.png" alt="XY7025 board" width="400">
 
 Modbus-RTU driver for the XY-series programmable buck converters
 (XY7025, XY6020L, XY6015, XY-SK60, XY-SK120, XY-SK120X). These modules
