@@ -39,7 +39,6 @@ impl MockUart {
 }
 
 impl BlockingRead for MockUart {
-    type Error = core::convert::Infallible;
     fn read(&mut self, buf: &mut [u8], _timeout_ms: u32) -> Result<usize, Self::Error> {
         let mut written = 0;
         while written < buf.len() && self.stale_pos < self.stale.len() {
@@ -158,6 +157,7 @@ impl DelayNs for CountingDelay {
 /// UART that fails (read or write) on demand.
 #[derive(Debug)]
 struct FailingUart {
+    fail_drain: bool,
     fail_read: bool,
     fail_write: bool,
     fail_flush: bool,
@@ -170,13 +170,15 @@ impl ErrorType for FailingUart {
     type Error = embedded_io::ErrorKind;
 }
 impl BlockingRead for FailingUart {
-    type Error = embedded_io::ErrorKind;
     fn read(&mut self, buf: &mut [u8], _timeout_ms: u32) -> Result<usize, Self::Error> {
-        if self.fail_read {
-            return Err(embedded_io::ErrorKind::Other);
+        if self.fail_drain && !self.armed {
+            return Err(embedded_io::ErrorKind::InvalidData);
+        }
+        if self.fail_read && self.armed {
+            return Err(embedded_io::ErrorKind::ConnectionReset);
         }
         let mut n = 0;
-        while n < buf.len() && self.resp_pos < self.response.len() {
+        while self.armed && n < buf.len() && self.resp_pos < self.response.len() {
             buf[n] = self.response[self.resp_pos];
             self.resp_pos += 1;
             n += 1;
@@ -187,7 +189,7 @@ impl BlockingRead for FailingUart {
 impl embedded_io::Write for FailingUart {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         if self.fail_write {
-            return Err(embedded_io::ErrorKind::Other);
+            return Err(embedded_io::ErrorKind::BrokenPipe);
         }
         self.armed = true;
         if self.write_returns_zero {
@@ -197,7 +199,7 @@ impl embedded_io::Write for FailingUart {
     }
     fn flush(&mut self) -> Result<(), Self::Error> {
         if self.fail_flush {
-            Err(embedded_io::ErrorKind::Other)
+            Err(embedded_io::ErrorKind::Interrupted)
         } else {
             Ok(())
         }
@@ -236,6 +238,7 @@ fn wrong_slave_in_response_propagates() {
 #[test]
 fn write_returning_zero_is_io_error() {
     let uart = FailingUart {
+        fail_drain: false,
         fail_read: false,
         fail_write: false,
         fail_flush: false,
@@ -249,7 +252,8 @@ fn write_returning_zero_is_io_error() {
     assert_eq!(
         t.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
         RtuError::Io {
-            operation: IoOperation::Write
+            operation: IoOperation::Write,
+            kind: IoErrorKind::WriteZero,
         }
     );
 }
@@ -257,6 +261,7 @@ fn write_returning_zero_is_io_error() {
 #[test]
 fn write_error_is_io_error() {
     let uart = FailingUart {
+        fail_drain: false,
         fail_read: false,
         fail_write: true,
         fail_flush: false,
@@ -269,7 +274,8 @@ fn write_error_is_io_error() {
     assert_eq!(
         t.write_single_holding(0x01, 0x0012, 0x0001).unwrap_err(),
         RtuError::Io {
-            operation: IoOperation::Write
+            operation: IoOperation::Write,
+            kind: IoErrorKind::BrokenPipe,
         }
     );
 }
@@ -277,6 +283,7 @@ fn write_error_is_io_error() {
 #[test]
 fn flush_error_identifies_flush_operation() {
     let uart = FailingUart {
+        fail_drain: false,
         fail_read: false,
         fail_write: false,
         fail_flush: true,
@@ -289,7 +296,8 @@ fn flush_error_identifies_flush_operation() {
     assert_eq!(
         t.write_single_holding(0x01, 0x0012, 0x0001).unwrap_err(),
         RtuError::Io {
-            operation: IoOperation::Flush
+            operation: IoOperation::Flush,
+            kind: IoErrorKind::Interrupted,
         }
     );
 }
@@ -298,6 +306,7 @@ fn flush_error_identifies_flush_operation() {
 fn read_error_mid_frame_is_io_error() {
     // Arm the UART with one byte of "response" but make read() return Err.
     let uart = FailingUart {
+        fail_drain: false,
         fail_read: true,
         fail_write: false,
         fail_flush: false,
@@ -311,24 +320,50 @@ fn read_error_mid_frame_is_io_error() {
     assert_eq!(
         t.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
         RtuError::Io {
-            operation: IoOperation::Read
+            operation: IoOperation::Read,
+            kind: IoErrorKind::ConnectionReset,
         }
     );
 }
 
 #[test]
-fn pre_tx_silence_applies_inter_frame_gap() {
-    // Even with stale RX present (which makes drain_rx do work), the
-    // inter_frame_ms gap must be observed before TX.
+fn pre_tx_activity_restarts_the_full_inter_frame_gap() {
     let response = frame_with_crc(std::vec![0x01, 0x03, 0x02, 0x00, 0x05]);
-    let uart = MockUart::new(response);
-    let mut t = UartTransport::new(uart, CountingDelay { total_ms: 0 }).with_timing(50, 7);
+    let cases = [(std::vec![], 7), (std::vec![0xAA, 0xBB, 0xCC], 14)];
+    for (stale, expected_delay_ms) in cases {
+        let uart = MockUart::new(response.clone()).with_stale(stale);
+        let mut transport =
+            UartTransport::new(uart, CountingDelay { total_ms: 0 }).with_timing(50, 7);
+        let mut out = [0u16; 1];
+        transport.read_holding(0x01, 0x0000, &mut out).unwrap();
+        assert_eq!(transport.into_parts().delay.total_ms, expected_delay_ms);
+    }
+}
+
+#[test]
+fn pre_tx_drain_error_is_reported_before_write() {
+    let uart = FailingUart {
+        fail_drain: true,
+        fail_read: false,
+        fail_write: false,
+        fail_flush: false,
+        write_returns_zero: false,
+        response: Vec::new(),
+        resp_pos: 0,
+        armed: false,
+    };
+    let mut transport = UartTransport::new(uart, CountingDelay { total_ms: 0 }).with_timing(50, 7);
     let mut out = [0u16; 1];
-    t.read_holding(0x01, 0x0000, &mut out).unwrap();
-    let delay = t.into_parts().delay;
-    // Exactly one pre-TX silence of 7 ms; no other delay_ms calls on the
-    // happy path (response is ready immediately, so read_exact never sleeps).
-    assert_eq!(delay.total_ms, 7);
+    assert_eq!(
+        transport.read_holding(0x01, 0x0000, &mut out),
+        Err(RtuError::Io {
+            operation: IoOperation::Read,
+            kind: IoErrorKind::InvalidData,
+        })
+    );
+    let parts = transport.into_parts();
+    assert!(!parts.uart.armed);
+    assert_eq!(parts.delay.total_ms, 7);
 }
 
 #[test]
@@ -371,7 +406,6 @@ fn read_exact_aggregates_byte_at_a_time() {
         type Error = core::convert::Infallible;
     }
     impl BlockingRead for DribbleUart {
-        type Error = core::convert::Infallible;
         fn read(&mut self, buf: &mut [u8], _timeout_ms: u32) -> Result<usize, Self::Error> {
             if !self.armed || self.pos >= self.response.len() || buf.is_empty() {
                 return Ok(0);

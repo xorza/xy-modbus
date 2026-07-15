@@ -20,7 +20,7 @@ use embedded_hal::delay::DelayNs;
 use embedded_io::Write;
 
 use crate::framing::{self, MAX_ADU, MAX_READ_REGS, MAX_WRITE_REGS, ResponseShape};
-use crate::transport::{IoOperation, ModbusTransport, RtuError};
+use crate::transport::{IoErrorKind, IoOperation, ModbusTransport, RtuError};
 
 // `write_multiple_holdings` builds the request frame into `self.buf` and
 // `expect`s success — sound only because the buffer fits the largest
@@ -32,9 +32,7 @@ const _: () = assert!(MAX_ADU >= 9 + 2 * MAX_WRITE_REGS);
 /// Wraps a UART driver that already knows how to block efficiently for
 /// incoming bytes. Avoiding `embedded_io::ReadReady` is deliberate: many
 /// kernel-backed HALs do not implement it and already block cheaply.
-pub trait BlockingRead {
-    type Error;
-
+pub trait BlockingRead: embedded_io::ErrorType {
     /// Block for up to `timeout_ms` waiting for at least one byte, then
     /// return up to `buf.len()` bytes. `Ok(0)` means no byte arrived.
     /// A zero timeout is a non-blocking poll used for the pre-TX flush.
@@ -95,12 +93,21 @@ where
         }
     }
 
-    /// Enforce ≥t3.5 bus silence before the next master frame, then
-    /// flush any noise that arrived during the gap.
-    fn pre_tx_silence(&mut self) {
-        self.delay.delay_ms(self.inter_frame_ms);
-        drain_rx(&mut self.uart);
+    /// Enforce ≥t3.5 bus silence before the next master frame.
+    fn pre_tx_silence(&mut self) -> Result<(), RtuError> {
+        loop {
+            self.delay.delay_ms(self.inter_frame_ms);
+            if drain_rx(&mut self.uart)? == DrainOutcome::Quiet {
+                return Ok(());
+            }
+        }
     }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum DrainOutcome {
+    Quiet,
+    Activity,
 }
 
 /// Discard whatever is already in the UART RX buffer. Cheap
@@ -108,19 +115,28 @@ where
 /// the inter-frame silence so it doesn't masquerade as the start of the
 /// slave's reply.
 ///
-/// Capped at `DRAIN_MAX_BYTES` total — a well-behaved UART hits Ok(0) or
-/// Err(…) within a few iterations, but a stuck driver returning >0
-/// forever would otherwise loop indefinitely. We'd rather give up
-/// draining and let the caller's exception/CRC checks fail than wedge.
-fn drain_rx<U: BlockingRead>(uart: &mut U) {
+/// Each pass is capped at `DRAIN_MAX_BYTES` so a driver that continuously
+/// returns data cannot spin here indefinitely. Reaching the cap reports
+/// activity and makes the caller wait another complete quiet interval.
+fn drain_rx<U: BlockingRead>(uart: &mut U) -> Result<DrainOutcome, RtuError> {
     const DRAIN_MAX_BYTES: usize = 4 * MAX_ADU;
     let mut scratch = [0u8; 32];
     let mut drained = 0;
     while drained < DRAIN_MAX_BYTES {
         match uart.read(&mut scratch, 0) {
-            Ok(0) | Err(_) => return,
+            Ok(0) if drained == 0 => return Ok(DrainOutcome::Quiet),
+            Ok(0) => return Ok(DrainOutcome::Activity),
             Ok(n) => drained += n,
+            Err(error) => return Err(io_error(IoOperation::Read, error)),
         }
+    }
+    Ok(DrainOutcome::Activity)
+}
+
+fn io_error<E: embedded_io::Error>(operation: IoOperation, error: E) -> RtuError {
+    RtuError::Io {
+        operation,
+        kind: IoErrorKind::from(error.kind()),
     }
 }
 
@@ -130,19 +146,15 @@ fn write_all<U: Write>(uart: &mut U, mut buf: &[u8]) -> Result<(), RtuError> {
             Ok(0) => {
                 return Err(RtuError::Io {
                     operation: IoOperation::Write,
+                    kind: IoErrorKind::WriteZero,
                 });
             }
             Ok(n) => buf = &buf[n..],
-            Err(_) => {
-                return Err(RtuError::Io {
-                    operation: IoOperation::Write,
-                });
-            }
+            Err(error) => return Err(io_error(IoOperation::Write, error)),
         }
     }
-    uart.flush().map_err(|_| RtuError::Io {
-        operation: IoOperation::Flush,
-    })?;
+    uart.flush()
+        .map_err(|error| io_error(IoOperation::Flush, error))?;
     Ok(())
 }
 
@@ -160,11 +172,7 @@ fn read_exact<U: BlockingRead>(
         match uart.read(&mut buf[filled..], read_timeout_ms) {
             Ok(0) => return Err(RtuError::Timeout),
             Ok(n) => filled += n,
-            Err(_) => {
-                return Err(RtuError::Io {
-                    operation: IoOperation::Read,
-                });
-            }
+            Err(error) => return Err(io_error(IoOperation::Read, error)),
         }
     }
     Ok(())
@@ -199,7 +207,7 @@ where
         let req = framing::build_read_request(slave, addr, count)
             .expect("register quantity validated above");
 
-        self.pre_tx_silence();
+        self.pre_tx_silence()?;
         write_all(&mut self.uart, &req)?;
 
         let resp = read_response(
@@ -222,7 +230,7 @@ where
         );
         let req = framing::build_write_single_request(slave, addr, value);
 
-        self.pre_tx_silence();
+        self.pre_tx_silence()?;
         write_all(&mut self.uart, &req)?;
 
         let resp = read_response(
@@ -255,7 +263,7 @@ where
         let n = framing::build_write_multiple_request(slave, addr, values, &mut self.buf)
             .expect("inputs validated above");
 
-        self.pre_tx_silence();
+        self.pre_tx_silence()?;
         write_all(&mut self.uart, &self.buf[..n])?;
 
         let resp = read_response(

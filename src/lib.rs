@@ -66,7 +66,7 @@ pub mod esp_idf;
 pub use device::Xy;
 pub use device::error::{InputError, InputField, XyError};
 pub use framing::{FrameError, ModbusError};
-pub use transport::{IoOperation, ModbusTransport, RtuError};
+pub use transport::{IoErrorKind, IoOperation, ModbusTransport, RtuError};
 pub use types::enums::{BaudRate, ProtectionStatus, RegMode, TempUnit};
 pub use types::group::GroupParams;
 pub use types::model::{Model, ModelLimits, ModelRange, ModelScales, ScaleCheck};

@@ -45,8 +45,10 @@ repository has no branch named `main`.
   `verify_scale_family` returns `ScaleCheck::Compatible` or `Inconclusive`
   without claiming exact model identity. Wire-encoded enums no longer expose
   `Unknown(u16)` variants.
-- **Breaking:** `RtuError::Io` now carries an `IoOperation`. `ModbusError` is
-  owned by `framing`, while both errors remain available from the crate root.
+- **Breaking:** `RtuError::Io` now carries an `IoOperation` and portable
+  `IoErrorKind`. `BlockingRead` extends `embedded_io::ErrorType` so read and
+  write failures preserve the same error classification. `ModbusError` is owned
+  by `framing`, while both errors remain available from the crate root.
 - **Breaking:** `FrameError::InvalidLength` is now `InvalidQuantity`;
   `ModbusError` and `RtuError` also report invalid read/write quantities instead
   of allowing parser or UART assertions.
@@ -68,6 +70,8 @@ repository has no branch named `main`.
 
 ### Fixed
 
+- Restarted the complete pre-transmit quiet interval whenever draining observes
+  RX activity, and report drain failures before writing a request.
 - Rejected non-finite, negative, out-of-model-range, and unrepresentable write
   values instead of silently clamping or normalizing them.
 - Enforced the documented XY7025 LVP minimum of 10 V for standalone and group

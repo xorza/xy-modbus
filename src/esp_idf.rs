@@ -25,8 +25,6 @@ use crate::types::model::Model;
 use crate::uart::{BlockingRead, UartTransport};
 
 impl BlockingRead for UartDriver<'_> {
-    type Error = EspIOError;
-
     fn read(&mut self, buf: &mut [u8], timeout_ms: u32) -> Result<usize, Self::Error> {
         let ticks = TickType::from(Duration::from_millis(timeout_ms as u64)).ticks();
         UartDriver::read(self, buf, ticks).map_err(EspIOError)

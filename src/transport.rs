@@ -27,6 +27,69 @@ impl fmt::Display for IoOperation {
     }
 }
 
+/// Portable classification of an underlying transport I/O failure.
+///
+/// The bundled UART maps every known `embedded_io::ErrorKind` into this type;
+/// future upstream categories fall back to [`IoErrorKind::Other`]. Keeping the
+/// classification here lets custom transports use the error API without
+/// enabling the optional `embedded-io` dependency.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum IoErrorKind {
+    Other,
+    NotFound,
+    PermissionDenied,
+    ConnectionRefused,
+    ConnectionReset,
+    ConnectionAborted,
+    NotConnected,
+    AddrInUse,
+    AddrNotAvailable,
+    BrokenPipe,
+    AlreadyExists,
+    InvalidInput,
+    InvalidData,
+    TimedOut,
+    Interrupted,
+    Unsupported,
+    OutOfMemory,
+    WriteZero,
+}
+
+impl fmt::Display for IoErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+#[cfg(feature = "embedded-io")]
+impl From<embedded_io::ErrorKind> for IoErrorKind {
+    fn from(kind: embedded_io::ErrorKind) -> Self {
+        match kind {
+            embedded_io::ErrorKind::Other => Self::Other,
+            embedded_io::ErrorKind::NotFound => Self::NotFound,
+            embedded_io::ErrorKind::PermissionDenied => Self::PermissionDenied,
+            embedded_io::ErrorKind::ConnectionRefused => Self::ConnectionRefused,
+            embedded_io::ErrorKind::ConnectionReset => Self::ConnectionReset,
+            embedded_io::ErrorKind::ConnectionAborted => Self::ConnectionAborted,
+            embedded_io::ErrorKind::NotConnected => Self::NotConnected,
+            embedded_io::ErrorKind::AddrInUse => Self::AddrInUse,
+            embedded_io::ErrorKind::AddrNotAvailable => Self::AddrNotAvailable,
+            embedded_io::ErrorKind::BrokenPipe => Self::BrokenPipe,
+            embedded_io::ErrorKind::AlreadyExists => Self::AlreadyExists,
+            embedded_io::ErrorKind::InvalidInput => Self::InvalidInput,
+            embedded_io::ErrorKind::InvalidData => Self::InvalidData,
+            embedded_io::ErrorKind::TimedOut => Self::TimedOut,
+            embedded_io::ErrorKind::Interrupted => Self::Interrupted,
+            embedded_io::ErrorKind::Unsupported => Self::Unsupported,
+            embedded_io::ErrorKind::OutOfMemory => Self::OutOfMemory,
+            embedded_io::ErrorKind::WriteZero => Self::WriteZero,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// Error returned by a Modbus-RTU transport operation.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -35,8 +98,11 @@ pub enum RtuError {
     InvalidQuantity(usize),
     /// No (or insufficient) bytes received within the response window.
     Timeout,
-    /// Underlying UART returned an I/O error.
-    Io { operation: IoOperation },
+    /// Underlying transport returned an I/O error.
+    Io {
+        operation: IoOperation,
+        kind: IoErrorKind,
+    },
     /// Decoded response was invalid or the slave reported a Modbus
     /// exception.
     Modbus(ModbusError),
@@ -47,7 +113,7 @@ impl fmt::Display for RtuError {
         match self {
             Self::InvalidQuantity(n) => write!(f, "invalid register quantity {n}"),
             Self::Timeout => f.write_str("UART response timed out"),
-            Self::Io { operation } => write!(f, "UART {operation} error"),
+            Self::Io { operation, kind } => write!(f, "UART {operation} error ({kind})"),
             Self::Modbus(e) => fmt::Display::fmt(e, f),
         }
     }
@@ -119,10 +185,11 @@ mod tests {
             format!(
                 "{}",
                 RtuError::Io {
-                    operation: IoOperation::Read
+                    operation: IoOperation::Read,
+                    kind: IoErrorKind::ConnectionReset,
                 }
             ),
-            "UART read error"
+            "UART read error (ConnectionReset)"
         );
         // Modbus variant delegates to inner Display.
         assert_eq!(
@@ -145,10 +212,75 @@ mod tests {
         assert!(RtuError::Timeout.source().is_none());
         assert!(
             RtuError::Io {
-                operation: IoOperation::Read
+                operation: IoOperation::Read,
+                kind: IoErrorKind::ConnectionReset,
             }
             .source()
             .is_none()
         );
+    }
+
+    #[cfg(feature = "embedded-io")]
+    #[test]
+    fn embedded_io_error_kinds_map_without_losing_detail() {
+        let cases = [
+            (embedded_io::ErrorKind::Other, IoErrorKind::Other),
+            (embedded_io::ErrorKind::NotFound, IoErrorKind::NotFound),
+            (
+                embedded_io::ErrorKind::PermissionDenied,
+                IoErrorKind::PermissionDenied,
+            ),
+            (
+                embedded_io::ErrorKind::ConnectionRefused,
+                IoErrorKind::ConnectionRefused,
+            ),
+            (
+                embedded_io::ErrorKind::ConnectionReset,
+                IoErrorKind::ConnectionReset,
+            ),
+            (
+                embedded_io::ErrorKind::ConnectionAborted,
+                IoErrorKind::ConnectionAborted,
+            ),
+            (
+                embedded_io::ErrorKind::NotConnected,
+                IoErrorKind::NotConnected,
+            ),
+            (embedded_io::ErrorKind::AddrInUse, IoErrorKind::AddrInUse),
+            (
+                embedded_io::ErrorKind::AddrNotAvailable,
+                IoErrorKind::AddrNotAvailable,
+            ),
+            (embedded_io::ErrorKind::BrokenPipe, IoErrorKind::BrokenPipe),
+            (
+                embedded_io::ErrorKind::AlreadyExists,
+                IoErrorKind::AlreadyExists,
+            ),
+            (
+                embedded_io::ErrorKind::InvalidInput,
+                IoErrorKind::InvalidInput,
+            ),
+            (
+                embedded_io::ErrorKind::InvalidData,
+                IoErrorKind::InvalidData,
+            ),
+            (embedded_io::ErrorKind::TimedOut, IoErrorKind::TimedOut),
+            (
+                embedded_io::ErrorKind::Interrupted,
+                IoErrorKind::Interrupted,
+            ),
+            (
+                embedded_io::ErrorKind::Unsupported,
+                IoErrorKind::Unsupported,
+            ),
+            (
+                embedded_io::ErrorKind::OutOfMemory,
+                IoErrorKind::OutOfMemory,
+            ),
+            (embedded_io::ErrorKind::WriteZero, IoErrorKind::WriteZero),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(IoErrorKind::from(source), expected);
+        }
     }
 }
