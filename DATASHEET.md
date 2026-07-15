@@ -83,7 +83,7 @@ Connector pinout (4-pin Molex/JST on the rear of the module):
 ### Timing requirements (empirical)
 
 These are not in the seller manual — they come from this project's bench
-testing of the XY7025 (`src/xy.rs`):
+testing of the XY7025 and the bundled transport (`src/uart/mod.rs`):
 
 | Constraint              | Value             | Notes                                             |
 |-------------------------|-------------------|---------------------------------------------------|
@@ -393,8 +393,7 @@ Set `S-LVP=10.00 V`, `S-OVP=15.00 V`, `S-OCP=12.50 A` in one frame
 
 ## 7. Bring-up checklist
 
-A safe boot sequence for charging applications (mirrors what
-`src/xy.rs` does in this repo):
+A safe boot sequence for charging applications:
 
 1. `set_output(false)` — write `0` to `0x0012` before anything else.
 2. `clear_protection_status` — write `0` to `0x0010` (wipes any
@@ -433,10 +432,8 @@ registers) plus separate reads of `0x0010` (PROTECT) and `0x0012`
 - **`BUZZER` register `0x001C`** appears unimplemented on at
   least some firmware revisions.
 - **Min inter-frame gap ~50 ms** — back-to-back writes inside this
-  window go unanswered. `src/xy.rs` uses a 10 ms post-write quiet
-  gap which is enough between *different* operations because the
-  read/write cycle naturally spans more than 50 ms; tighten with
-  care.
+  window go unanswered. `src/uart/mod.rs` enforces this before every
+  request; tighten with care.
 - **`AH-HIGH` / `WH-HIGH` testing** — the original community docs
   flag these high words as untested. Don't trust the 32-bit
   composition without verifying on your hardware.
@@ -471,7 +468,6 @@ The information in this document was compiled from:
 5. XY7025 seller manual at [manuals.plus](https://manuals.plus/ae/1005008036046439) —
    physical specs, accuracy, protection ranges. The PDF does
    **not** include a Modbus register map.
-6. `src/xy.rs` in this repository — empirical timing values
-   (`response_timeout = 500 ms`, `post_write_gap = 10 ms`), the
-   safe boot sequence, and the `S-INI=0` rationale for charging
-   applications.
+6. `src/uart/mod.rs` and `src/device/mod.rs` in this repository — the
+   bundled transport timing, high-level register operations, and the
+   `S-INI=0` rationale for charging applications.

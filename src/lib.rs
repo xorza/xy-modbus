@@ -2,17 +2,17 @@
 //! siblings via `Model::Custom`).
 //!
 //! These modules share a common Modbus-RTU register layout — see the
-//! crate's `README.md` for the full protocol reference.
+//! crate's `DATASHEET.md` for the full protocol reference.
 //!
 //! ```no_run
-//! # use xy_modbus::{ModbusTransport, RtuError};
+//! # use xy_modbus::{ModbusTransport, RtuError, XyError};
 //! # struct MyTransport;
 //! # impl ModbusTransport for MyTransport {
 //! #     fn read_holding(&mut self, _: u8, _: u16, _: &mut [u16]) -> Result<(), RtuError> { unimplemented!() }
 //! #     fn write_single_holding(&mut self, _: u8, _: u16, _: u16) -> Result<(), RtuError> { unimplemented!() }
 //! #     fn write_multiple_holdings(&mut self, _: u8, _: u16, _: &[u16]) -> Result<(), RtuError> { unimplemented!() }
 //! # }
-//! # fn main() -> Result<(), RtuError> {
+//! # fn main() -> Result<(), XyError> {
 //! # let my_transport = MyTransport;
 //! use xy_modbus::{Model, Xy, SafetyLimits};
 //!
@@ -46,8 +46,6 @@
 
 #![no_std]
 
-// ─── Modules ─────────────────────────────────────────────────────────────────
-
 mod device;
 mod types;
 
@@ -64,15 +62,14 @@ pub mod uart;
 #[cfg(all(feature = "esp-idf-hal", target_os = "espidf"))]
 pub mod esp_idf;
 
-// ─── Re-exports ──────────────────────────────────────────────────────────────
-
 pub use device::Xy;
-pub use framing::FrameError;
-pub use transport::{BlockingRead, ModbusError, ModbusTransport, RtuError};
-pub use types::{
-    BaudRate, GroupParams, Model, ModelCheck, OnTime, ProtectionStatus, RegMode, SafetyLimits,
-    Setpoints, Status, TempUnit, Temperatures, Totals,
-};
+pub use device::error::{InputError, XyError};
+pub use framing::{FrameError, ModbusError};
+pub use transport::{IoOperation, ModbusTransport, RtuError};
+pub use types::enums::{BaudRate, ProtectionStatus, RegMode, TempUnit};
+pub use types::group::GroupParams;
+pub use types::model::{Model, ModelCheck};
+pub use types::status::{OnTime, SafetyLimits, Setpoints, Status, Temperatures, Totals};
 
 #[cfg(feature = "embedded-io")]
-pub use uart::UartTransport;
+pub use uart::{BlockingRead, UartParts, UartTransport};

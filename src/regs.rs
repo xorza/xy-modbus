@@ -4,17 +4,9 @@
 //! is the divisor to apply to the raw integer to obtain the physical
 //! value (so a raw `1440` at scale `100` is `14.40`).
 
-// This module is the canonical address surface for the whole register
-// map. Some entries aren't referenced by the high-level API yet (rarely
-// used registers, group offsets, individual M0 protection fields) but
-// are kept so the map stays complete in one place.
-#![allow(dead_code)]
-
 /// Default Modbus slave address. Reconfigurable via [`REG_SLAVE_ADDR`];
 /// the new value only takes effect after the device resets.
 pub const DEFAULT_SLAVE: u8 = 0x01;
-
-// ─── Status & runtime control (0x0000 – 0x001E) ──────────────────────────────
 
 /// V-SET — output voltage setpoint. Scale 100 (V).
 pub const REG_V_SET: u16 = 0x0000;
@@ -77,25 +69,6 @@ pub const REG_T_EX_OFFSET: u16 = 0x001B;
 pub const REG_BUZZER: u16 = 0x001C;
 /// EXTRACT-M — recall a memory group into M0 (write 0–9).
 pub const REG_EXTRACT_M: u16 = 0x001D;
-/// DEVICE — device status. Documented but unreliable on some firmware.
-pub const REG_DEVICE: u16 = 0x001E;
-
-// ─── WiFi pairing (0x0030 – 0x0034) — pending ────────────────────────────────
-//
-// Only populated when a SiniLink XY-WFPOW (ESP8285) board is attached.
-// Register addresses are listed here for reference; the high-level API
-// in `device.rs` does not yet expose them — see the README for the
-// register layout if you want to drive these directly via
-// `ModbusTransport`.
-//
-//   0x0030  WiFi MASTER       host type (0x3B3A = WiFi)
-//   0x0031  WiFi CONFIG       pairing mode (0 invalid / 1 touch / 2 AP)
-//   0x0032  WiFi STATUS       link state (0 none / 1 router / 2 server / 3 touch / 4 AP)
-//   0x0033  IPV4-H            high 16 bits of IPv4 address
-//   0x0034  IPV4-L            low 16 bits of IPv4 address
-
-// ─── Memory groups M0–M9 ─────────────────────────────────────────────────────
-//
 // 10 preset groups, 14 registers each, base 0x0050, stride 0x0010.
 // M0 is the live operating set.
 
@@ -111,32 +84,11 @@ pub const fn group_addr(n: u8) -> u16 {
     GROUP_BASE + (n as u16) * GROUP_STRIDE
 }
 
-// In-group register offsets (add to `group_addr(n)` to get an absolute address).
-pub const GROUP_OFF_V_SET: u16 = 0;
-pub const GROUP_OFF_I_SET: u16 = 1;
-pub const GROUP_OFF_S_LVP: u16 = 2;
-pub const GROUP_OFF_S_OVP: u16 = 3;
-pub const GROUP_OFF_S_OCP: u16 = 4;
-pub const GROUP_OFF_S_OPP: u16 = 5;
-pub const GROUP_OFF_S_OHP_H: u16 = 6;
-pub const GROUP_OFF_S_OHP_M: u16 = 7;
-pub const GROUP_OFF_S_OAH_L: u16 = 8;
-pub const GROUP_OFF_S_OAH_H: u16 = 9;
-pub const GROUP_OFF_S_OWH_L: u16 = 10;
-pub const GROUP_OFF_S_OWH_H: u16 = 11;
-pub const GROUP_OFF_S_OTP: u16 = 12;
-pub const GROUP_OFF_S_INI: u16 = 13;
+pub const REG_S_LVP: u16 = GROUP_BASE + 2;
+pub const REG_S_OVP: u16 = GROUP_BASE + 3;
+pub const REG_S_OCP: u16 = GROUP_BASE + 4;
+pub const REG_S_INI: u16 = GROUP_BASE + 13;
 
-// Convenience absolute addresses for the active group (M0).
-pub const REG_S_LVP: u16 = GROUP_BASE + GROUP_OFF_S_LVP;
-pub const REG_S_OVP: u16 = GROUP_BASE + GROUP_OFF_S_OVP;
-pub const REG_S_OCP: u16 = GROUP_BASE + GROUP_OFF_S_OCP;
-pub const REG_S_OPP: u16 = GROUP_BASE + GROUP_OFF_S_OPP;
-pub const REG_S_OTP: u16 = GROUP_BASE + GROUP_OFF_S_OTP;
-pub const REG_S_INI: u16 = GROUP_BASE + GROUP_OFF_S_INI;
-
-// ─── Bulk-access layout invariants ───────────────────────────────────────────
-//
 // Every bulk read/write in `device::*` sends a single Modbus transaction
 // over a contiguous register span. These asserts pin the adjacency the
 // callers rely on — a typo'd address constant turns into a build error
@@ -169,20 +121,3 @@ const _: () = assert!(REG_S_OCP == REG_S_LVP + 2);
 
 // `read_temperatures` (T_IN, T_EX).
 const _: () = assert!(REG_T_EX == REG_T_IN + 1);
-
-// `read_group` / `write_group` walk all 14 in-group offsets in order.
-const _: () = assert!(GROUP_OFF_V_SET == 0);
-const _: () = assert!(GROUP_OFF_I_SET == 1);
-const _: () = assert!(GROUP_OFF_S_LVP == 2);
-const _: () = assert!(GROUP_OFF_S_OVP == 3);
-const _: () = assert!(GROUP_OFF_S_OCP == 4);
-const _: () = assert!(GROUP_OFF_S_OPP == 5);
-const _: () = assert!(GROUP_OFF_S_OHP_H == 6);
-const _: () = assert!(GROUP_OFF_S_OHP_M == 7);
-const _: () = assert!(GROUP_OFF_S_OAH_L == 8);
-const _: () = assert!(GROUP_OFF_S_OAH_H == 9);
-const _: () = assert!(GROUP_OFF_S_OWH_L == 10);
-const _: () = assert!(GROUP_OFF_S_OWH_H == 11);
-const _: () = assert!(GROUP_OFF_S_OTP == 12);
-const _: () = assert!(GROUP_OFF_S_INI == 13);
-const _: () = assert!(GROUP_LEN == 14);

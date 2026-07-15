@@ -3,8 +3,6 @@
 
 use core::fmt;
 
-// ─── RegMode ─────────────────────────────────────────────────────────────────
-
 /// Regulation mode reported by `CVCC` (register 0x0011).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -15,15 +13,14 @@ pub enum RegMode {
 }
 
 impl RegMode {
-    pub const fn from_reg(v: u16) -> Self {
-        match v {
+    pub(crate) const fn from_reg(v: u16) -> Result<Self, u16> {
+        Ok(match v {
             0 => Self::ConstantVoltage,
-            _ => Self::ConstantCurrent,
-        }
+            1 => Self::ConstantCurrent,
+            invalid => return Err(invalid),
+        })
     }
 }
-
-// ─── TempUnit ────────────────────────────────────────────────────────────────
 
 /// Temperature unit selected by `F-C` (register 0x0013).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -35,21 +32,20 @@ pub enum TempUnit {
 }
 
 impl TempUnit {
-    pub const fn from_reg(v: u16) -> Self {
-        match v {
+    pub(crate) const fn from_reg(v: u16) -> Result<Self, u16> {
+        Ok(match v {
             0 => Self::Celsius,
-            _ => Self::Fahrenheit,
-        }
+            1 => Self::Fahrenheit,
+            invalid => return Err(invalid),
+        })
     }
-    pub const fn to_reg(self) -> u16 {
+    pub(crate) const fn code(self) -> u16 {
         match self {
             Self::Celsius => 0,
             Self::Fahrenheit => 1,
         }
     }
 }
-
-// ─── ProtectionStatus ────────────────────────────────────────────────────────
 
 /// Latched protection cause read from `PROTECT` (register 0x0010).
 ///
@@ -83,13 +79,11 @@ pub enum ProtectionStatus {
     Owh,
     /// Input over-current / inrush.
     Icp,
-    /// Register read back a value outside the documented 0–10 range.
-    Unknown(u16),
 }
 
 impl ProtectionStatus {
-    pub const fn from_reg(raw: u16) -> Self {
-        match raw {
+    pub(crate) const fn from_reg(raw: u16) -> Result<Self, u16> {
+        Ok(match raw {
             0 => Self::Normal,
             1 => Self::Ovp,
             2 => Self::Ocp,
@@ -101,8 +95,8 @@ impl ProtectionStatus {
             8 => Self::Oep,
             9 => Self::Owh,
             10 => Self::Icp,
-            other => Self::Unknown(other),
-        }
+            invalid => return Err(invalid),
+        })
     }
 }
 
@@ -120,12 +114,9 @@ impl fmt::Display for ProtectionStatus {
             Self::Oep => "oep",
             Self::Owh => "owh",
             Self::Icp => "icp",
-            Self::Unknown(v) => return write!(f, "unknown({v})"),
         })
     }
 }
-
-// ─── BaudRate ────────────────────────────────────────────────────────────────
 
 /// Baud-rate codes for `BAUDRATE_L` (register 0x0019).
 ///
@@ -145,13 +136,10 @@ pub enum BaudRate {
     B115200,
     B2400,
     B4800,
-    /// Register read back a code outside the documented 0–8 range.
-    Unknown(u16),
 }
 
 impl BaudRate {
-    /// Encoded register value. `Unknown(c)` round-trips its raw code.
-    pub const fn code(self) -> u16 {
+    pub(crate) const fn code(self) -> u16 {
         match self {
             Self::B9600 => 0,
             Self::B14400 => 1,
@@ -162,11 +150,10 @@ impl BaudRate {
             Self::B115200 => 6,
             Self::B2400 => 7,
             Self::B4800 => 8,
-            Self::Unknown(c) => c,
         }
     }
-    pub const fn from_code(code: u16) -> Self {
-        match code {
+    pub(crate) const fn from_code(code: u16) -> Result<Self, u16> {
+        Ok(match code {
             0 => Self::B9600,
             1 => Self::B14400,
             2 => Self::B19200,
@@ -176,12 +163,11 @@ impl BaudRate {
             6 => Self::B115200,
             7 => Self::B2400,
             8 => Self::B4800,
-            c => Self::Unknown(c),
-        }
+            invalid => return Err(invalid),
+        })
     }
-    /// Bits-per-second, or `None` for `Unknown`.
-    pub const fn baud(self) -> Option<u32> {
-        Some(match self {
+    pub const fn baud(self) -> u32 {
+        match self {
             Self::B2400 => 2400,
             Self::B4800 => 4800,
             Self::B9600 => 9600,
@@ -191,8 +177,7 @@ impl BaudRate {
             Self::B56000 => 56000,
             Self::B57600 => 57600,
             Self::B115200 => 115200,
-            Self::Unknown(_) => return None,
-        })
+        }
     }
 }
 
@@ -202,9 +187,6 @@ mod tests {
     use super::*;
     use std::format;
 
-    /// Pin every documented protection code (0..=10) plus an out-of-range
-    /// case. A reordering of the match arms in `from_reg` would surface
-    /// here.
     #[test]
     fn protection_status_from_reg_full_mapping() {
         let cases = [
@@ -219,26 +201,21 @@ mod tests {
             (8, ProtectionStatus::Oep),
             (9, ProtectionStatus::Owh),
             (10, ProtectionStatus::Icp),
-            (11, ProtectionStatus::Unknown(11)),
-            (0xFFFF, ProtectionStatus::Unknown(0xFFFF)),
         ];
         for (raw, expected) in cases {
-            assert_eq!(ProtectionStatus::from_reg(raw), expected);
+            assert_eq!(ProtectionStatus::from_reg(raw), Ok(expected));
         }
+        assert_eq!(ProtectionStatus::from_reg(11), Err(11));
+        assert_eq!(ProtectionStatus::from_reg(u16::MAX), Err(u16::MAX));
     }
 
-    /// Display strings are part of the public API (used in logs); pin them.
     #[test]
     fn protection_status_display_strings() {
         assert_eq!(format!("{}", ProtectionStatus::Normal), "normal");
         assert_eq!(format!("{}", ProtectionStatus::Ovp), "ovp");
         assert_eq!(format!("{}", ProtectionStatus::Icp), "icp");
-        assert_eq!(format!("{}", ProtectionStatus::Unknown(42)), "unknown(42)");
     }
 
-    /// `code()` and `from_code()` must invert each other across the full
-    /// 0..=8 range, and `Unknown(c)` must round-trip arbitrary codes.
-    /// `baud()` returns the documented bits-per-second.
     #[test]
     fn baud_rate_full_table() {
         let cases = [
@@ -253,22 +230,22 @@ mod tests {
             (8, BaudRate::B4800, 4800),
         ];
         for (code, variant, bps) in cases {
-            assert_eq!(BaudRate::from_code(code), variant);
+            assert_eq!(BaudRate::from_code(code), Ok(variant));
             assert_eq!(variant.code(), code);
-            assert_eq!(variant.baud(), Some(bps));
+            assert_eq!(variant.baud(), bps);
         }
-        assert_eq!(BaudRate::from_code(99), BaudRate::Unknown(99));
-        assert_eq!(BaudRate::Unknown(99).code(), 99);
-        assert_eq!(BaudRate::Unknown(99).baud(), None);
+        assert_eq!(BaudRate::from_code(99), Err(99));
     }
 
     #[test]
     fn temp_unit_round_trip() {
-        assert_eq!(TempUnit::from_reg(0), TempUnit::Celsius);
-        assert_eq!(TempUnit::from_reg(1), TempUnit::Fahrenheit);
-        // Any nonzero value decodes to Fahrenheit.
-        assert_eq!(TempUnit::from_reg(99), TempUnit::Fahrenheit);
-        assert_eq!(TempUnit::Celsius.to_reg(), 0);
-        assert_eq!(TempUnit::Fahrenheit.to_reg(), 1);
+        assert_eq!(TempUnit::from_reg(0), Ok(TempUnit::Celsius));
+        assert_eq!(TempUnit::from_reg(1), Ok(TempUnit::Fahrenheit));
+        assert_eq!(TempUnit::from_reg(99), Err(99));
+        assert_eq!(TempUnit::Celsius.code(), 0);
+        assert_eq!(TempUnit::Fahrenheit.code(), 1);
+        assert_eq!(RegMode::from_reg(0), Ok(RegMode::ConstantVoltage));
+        assert_eq!(RegMode::from_reg(1), Ok(RegMode::ConstantCurrent));
+        assert_eq!(RegMode::from_reg(99), Err(99));
     }
 }

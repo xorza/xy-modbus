@@ -1,20 +1,31 @@
 extern crate std;
+use core::num::NonZeroU16;
 use std::vec;
 use std::vec::Vec;
 
 use super::*;
-use crate::transport::ModbusError;
+use crate::framing::ModbusError;
 
 /// Scriptable transport for tests. Each script entry pairs a
 /// register-or-value request with a canned response or error.
+#[derive(Debug)]
 enum Op {
     Read { addr: u16, values: Vec<u16> },
     WriteOne { addr: u16, value: u16 },
     WriteMany { addr: u16, values: Vec<u16> },
 }
 
+#[derive(Debug)]
 struct MockTransport {
     script: Vec<Op>,
+}
+
+fn custom_model(current_scale: u16, power_scale: u16, opp_scale: u16) -> Model {
+    Model::Custom {
+        current_scale: NonZeroU16::new(current_scale).unwrap(),
+        power_scale: NonZeroU16::new(power_scale).unwrap(),
+        opp_scale: NonZeroU16::new(opp_scale).unwrap(),
+    }
 }
 
 impl MockTransport {
@@ -108,14 +119,7 @@ fn model_scales_diverge_between_xy7025_and_sk_custom() {
         addr: REG_V_SET,
         values: status_fixture(regs),
     }]);
-    let mut xy = Xy::new(
-        sk_mock,
-        Model::Custom {
-            current_scale: 1000,
-            power_scale: 100,
-            opp_scale: 10,
-        },
-    );
+    let mut xy = Xy::new(sk_mock, custom_model(1000, 100, 10));
     let s = xy.read_status().unwrap();
     assert_eq!(s.i_set, 1.000);
     assert_eq!(s.i_out, 1.000);
@@ -132,11 +136,7 @@ fn model_scales_diverge_between_xy7025_and_sk_custom() {
 /// through the supplied values verbatim.
 #[test]
 fn custom_model_routes_user_supplied_scales() {
-    let m = Model::Custom {
-        current_scale: 500,
-        power_scale: 25,
-        opp_scale: 4,
-    };
+    let m = custom_model(500, 25, 4);
     assert_eq!(m.current_scale(), 500.0);
     assert_eq!(m.power_scale(), 25.0);
     assert_eq!(m.opp_scale(), 4.0);
@@ -183,7 +183,7 @@ fn read_protection_decodes_three_regs() {
 }
 
 #[test]
-fn protection_status_decodes_known_codes() {
+fn protection_status_decodes_known_and_rejects_unknown_codes() {
     let mock = MockTransport::new(vec![
         Op::Read {
             addr: REG_PROTECT,
@@ -205,8 +205,11 @@ fn protection_status_decodes_known_codes() {
     );
     assert_eq!(xy.read_protection_status().unwrap(), ProtectionStatus::Lvp);
     assert_eq!(
-        xy.read_protection_status().unwrap(),
-        ProtectionStatus::Unknown(99)
+        xy.read_protection_status(),
+        Err(XyError::InvalidRegisterValue {
+            register: REG_PROTECT,
+            value: 99,
+        })
     );
 }
 
@@ -291,8 +294,8 @@ fn read_group_decodes_14_regs() {
     }]);
     let mut xy = Xy::new(mock, Model::Xy7025);
     let g = xy.read_group(1).unwrap();
-    assert_eq!(g.v_set, 14.40);
-    assert_eq!(g.s_ovp_v, 15.00);
+    assert_eq!(g.setpoints.v_set, 14.40);
+    assert_eq!(g.safety_limits.ovp_v, 15.00);
     assert_eq!(g.s_opp_w, 1800.0);
     assert_eq!(g.s_oah_ah, 0.0);
     assert_eq!(g.s_owh_wh, 0.0);
@@ -303,11 +306,15 @@ fn read_group_decodes_14_regs() {
 #[test]
 fn write_group_round_trips_through_encode() {
     let p = GroupParams {
-        v_set: 14.40,
-        i_set: 10.00,
-        s_lvp_v: 10.00,
-        s_ovp_v: 15.00,
-        s_ocp_a: 12.50,
+        setpoints: Setpoints {
+            v_set: 14.40,
+            i_set: 10.00,
+        },
+        safety_limits: SafetyLimits {
+            lvp_v: 10.00,
+            ovp_v: 15.00,
+            ocp_a: 12.50,
+        },
         s_opp_w: 1800.0,
         s_ohp_h: 0,
         s_ohp_m: 0,
@@ -337,13 +344,10 @@ fn baud_round_trip() {
         BaudRate::B57600,
         BaudRate::B115200,
     ] {
-        assert_eq!(BaudRate::from_code(baud.code()), baud);
+        assert_eq!(BaudRate::from_code(baud.code()), Ok(baud));
     }
-    assert_eq!(BaudRate::from_code(99), BaudRate::Unknown(99));
-    // Unknown round-trips its raw code.
-    assert_eq!(BaudRate::Unknown(99).code(), 99);
-    assert_eq!(BaudRate::Unknown(99).baud(), None);
-    assert_eq!(BaudRate::B9600.baud(), Some(9600));
+    assert_eq!(BaudRate::from_code(99), Err(99));
+    assert_eq!(BaudRate::B9600.baud(), 9600);
 }
 
 #[test]
@@ -353,11 +357,15 @@ fn group_encode_decode_round_trip() {
     // S-OAH raw = (2<<16) | 500 = 131_572 → 131.572 Ah (scale 1000).
     // S-OWH raw = 12_345 → 123.45 Wh (scale 100).
     let p = GroupParams {
-        v_set: 14.40,
-        i_set: 10.00,
-        s_lvp_v: 10.00,
-        s_ovp_v: 15.00,
-        s_ocp_a: 12.50,
+        setpoints: Setpoints {
+            v_set: 14.40,
+            i_set: 10.00,
+        },
+        safety_limits: SafetyLimits {
+            lvp_v: 10.00,
+            ovp_v: 15.00,
+            ocp_a: 12.50,
+        },
         s_opp_w: 1800.0,
         s_ohp_h: 7,
         s_ohp_m: 30,
@@ -366,15 +374,12 @@ fn group_encode_decode_round_trip() {
         s_otp: 95.0,
         power_on_output: true,
     };
-    let regs = encode_group(&p, Model::Xy7025);
+    let regs = encode_group(&p, Model::Xy7025).unwrap();
     // Pin the encoded oah/owh register pair layout (low, high).
     assert_eq!(regs[8..12], [500, 2, 12_345, 0]);
-    let decoded = decode_group(&regs, Model::Xy7025);
-    assert_eq!(decoded.v_set, p.v_set);
-    assert_eq!(decoded.i_set, p.i_set);
-    assert_eq!(decoded.s_lvp_v, p.s_lvp_v);
-    assert_eq!(decoded.s_ovp_v, p.s_ovp_v);
-    assert_eq!(decoded.s_ocp_a, p.s_ocp_a);
+    let decoded = decode_group(&regs, Model::Xy7025, group_addr(0)).unwrap();
+    assert_eq!(decoded.setpoints, p.setpoints);
+    assert_eq!(decoded.safety_limits, p.safety_limits);
     assert_eq!(decoded.s_opp_w, p.s_opp_w);
     assert_eq!(decoded.s_ohp_h, p.s_ohp_h);
     assert_eq!(decoded.s_ohp_m, p.s_ohp_m);
@@ -407,15 +412,13 @@ fn one_shot_setters_use_correct_addr_and_value() {
     check!(REG_PROTECT, 0, |x: &mut Xy<_>| x.clear_protection_status());
     check!(REG_LOCK, 1, |x: &mut Xy<_>| x.set_lock(true));
     check!(REG_BACKLIGHT, 3, |x: &mut Xy<_>| x.set_backlight(3));
-    check!(REG_SLEEP, 12, |x: &mut Xy<_>| x.set_sleep_minutes(12));
+    check!(REG_SLEEP, 9, |x: &mut Xy<_>| x.set_sleep_minutes(9));
     check!(REG_BUZZER, 1, |x: &mut Xy<_>| x.set_buzzer(true));
     check!(REG_SLAVE_ADDR, 7, |x: &mut Xy<_>| x.set_slave_address(7));
     check!(REG_S_INI, 1, |x: &mut Xy<_>| x.set_power_on_output(true));
     check!(REG_EXTRACT_M, 3, |x: &mut Xy<_>| x.recall_group(3));
     check!(REG_BAUD_CODE, 6, |x: &mut Xy<_>| x
         .set_baud_rate(BaudRate::B115200));
-    check!(REG_BAUD_CODE, 99, |x: &mut Xy<_>| x
-        .set_baud_rate(BaudRate::Unknown(99)));
     check!(REG_TEMP_UNIT, 1, |x: &mut Xy<_>| x
         .set_temp_unit(TempUnit::Fahrenheit));
 }
@@ -441,7 +444,7 @@ fn one_shot_getters_use_correct_addr_and_scale() {
     check!(REG_OUTPUT_EN, 1, |x: &mut Xy<_>| x.read_output(), true);
     check!(REG_LOCK, 1, |x: &mut Xy<_>| x.read_lock(), true);
     check!(REG_BACKLIGHT, 4, |x: &mut Xy<_>| x.read_backlight(), 4u8);
-    check!(REG_SLEEP, 15, |x: &mut Xy<_>| x.read_sleep_minutes(), 15u16);
+    check!(REG_SLEEP, 9, |x: &mut Xy<_>| x.read_sleep_minutes(), 9u16);
     check!(REG_BUZZER, 0, |x: &mut Xy<_>| x.read_buzzer(), false);
     check!(
         REG_SLAVE_ADDR,
@@ -510,7 +513,96 @@ fn one_shot_getters_use_correct_addr_and_scale() {
     );
     let t = xy.read_temperatures().unwrap();
     assert_eq!(t.internal, 34.5);
-    assert_eq!(t._external_unverified, 25.6);
+    assert_eq!(t.external, Some(25.6));
+
+    let mut xy = Xy::new(
+        MockTransport::new(vec![Op::Read {
+            addr: REG_T_IN,
+            values: vec![345, 8888],
+        }]),
+        Model::Xy7025,
+    );
+    assert_eq!(xy.read_temperatures().unwrap().external, None);
+}
+
+#[test]
+fn invalid_register_values_are_not_normalized() {
+    let mut group = vec![0; GROUP_LEN as usize];
+    group[13] = 2;
+    let mut invalid_output_status = status_fixture([0; 6]);
+    invalid_output_status[REG_OUTPUT_EN as usize] = 2;
+    let mut invalid_protection_status = status_fixture([0; 6]);
+    invalid_protection_status[REG_PROTECT as usize] = 11;
+    let mut invalid_reg_mode_status = status_fixture([0; 6]);
+    invalid_reg_mode_status[REG_CVCC as usize] = 2;
+    let mut xy = Xy::new(
+        MockTransport::new(vec![
+            Op::Read {
+                addr: REG_OUTPUT_EN,
+                values: vec![2],
+            },
+            Op::Read {
+                addr: REG_BACKLIGHT,
+                values: vec![6],
+            },
+            Op::Read {
+                addr: REG_SLEEP,
+                values: vec![10],
+            },
+            Op::Read {
+                addr: REG_PROTECT,
+                values: vec![11],
+            },
+            Op::Read {
+                addr: REG_CVCC,
+                values: vec![2],
+            },
+            Op::Read {
+                addr: REG_TEMP_UNIT,
+                values: vec![2],
+            },
+            Op::Read {
+                addr: REG_BAUD_CODE,
+                values: vec![9],
+            },
+            Op::Read {
+                addr: group_addr(1),
+                values: group,
+            },
+            Op::Read {
+                addr: REG_V_SET,
+                values: invalid_output_status,
+            },
+            Op::Read {
+                addr: REG_V_SET,
+                values: invalid_protection_status,
+            },
+            Op::Read {
+                addr: REG_V_SET,
+                values: invalid_reg_mode_status,
+            },
+        ]),
+        Model::Xy7025,
+    );
+
+    for (result, register, value) in [
+        (xy.read_output().map(|_| ()), REG_OUTPUT_EN, 2),
+        (xy.read_backlight().map(|_| ()), REG_BACKLIGHT, 6),
+        (xy.read_sleep_minutes().map(|_| ()), REG_SLEEP, 10),
+        (xy.read_protection_status().map(|_| ()), REG_PROTECT, 11),
+        (xy.read_reg_mode().map(|_| ()), REG_CVCC, 2),
+        (xy.read_temp_unit().map(|_| ()), REG_TEMP_UNIT, 2),
+        (xy.read_baud_rate().map(|_| ()), REG_BAUD_CODE, 9),
+        (xy.read_group(1).map(|_| ()), group_addr(1) + 13, 2),
+        (xy.read_status().map(|_| ()), REG_OUTPUT_EN, 2),
+        (xy.read_status().map(|_| ()), REG_PROTECT, 11),
+        (xy.read_status().map(|_| ()), REG_CVCC, 2),
+    ] {
+        assert_eq!(
+            result,
+            Err(XyError::InvalidRegisterValue { register, value })
+        );
+    }
 }
 
 #[test]
@@ -519,19 +611,19 @@ fn temp_unit_round_trip() {
     let mock = MockTransport::new(vec![
         Op::WriteOne {
             addr: REG_TEMP_UNIT,
-            value: TempUnit::Celsius.to_reg(),
+            value: 0,
         },
         Op::Read {
             addr: REG_TEMP_UNIT,
-            values: vec![TempUnit::Celsius.to_reg()],
+            values: vec![0],
         },
         Op::WriteOne {
             addr: REG_TEMP_UNIT,
-            value: TempUnit::Fahrenheit.to_reg(),
+            value: 1,
         },
         Op::Read {
             addr: REG_TEMP_UNIT,
-            values: vec![TempUnit::Fahrenheit.to_reg()],
+            values: vec![1],
         },
     ]);
     let mut xy = Xy::new(mock, Model::Xy7025);
@@ -557,11 +649,15 @@ fn preset_models_match_datasheet_scales() {
 fn group_encode_under_custom_sk_scales_uses_opp_scale_10() {
     // 18.0 W S-OPP → raw 180 with opp_scale=10, would be 18 on XY7025.
     let p = GroupParams {
-        v_set: 5.0,
-        i_set: 1.0,
-        s_lvp_v: 0.0,
-        s_ovp_v: 0.0,
-        s_ocp_a: 0.0,
+        setpoints: Setpoints {
+            v_set: 5.0,
+            i_set: 1.0,
+        },
+        safety_limits: SafetyLimits {
+            lvp_v: 0.0,
+            ovp_v: 0.0,
+            ocp_a: 0.0,
+        },
         s_opp_w: 18.0,
         s_ohp_h: 0,
         s_ohp_m: 0,
@@ -575,14 +671,7 @@ fn group_encode_under_custom_sk_scales_uses_opp_scale_10() {
         // v_set=500, i_set=1000 (current_scale=1000), s_opp=180, s_otp=0.
         values: vec![500, 1000, 0, 0, 0, 180, 0, 0, 0, 0, 0, 0, 0, 0],
     }]);
-    let mut xy = Xy::new(
-        mock,
-        Model::Custom {
-            current_scale: 1000,
-            power_scale: 100,
-            opp_scale: 10,
-        },
-    );
+    let mut xy = Xy::new(mock, custom_model(1000, 100, 10));
     xy.write_group(0, &p).unwrap();
 }
 
@@ -603,18 +692,59 @@ fn rtu_error_propagates() {
     let mut xy = Xy::new(FailRead, Model::Xy7025);
     assert!(matches!(
         xy.read_voltage_out(),
-        Err(RtuError::Modbus(ModbusError::BadCrc))
+        Err(XyError::Rtu(RtuError::Modbus(ModbusError::BadCrc)))
     ));
 }
 
 #[test]
+fn invalid_inputs_fail_before_transport_io() {
+    assert_eq!(
+        Xy::with_slave(MockTransport::new(vec![]), Model::Xy7025, 0).unwrap_err(),
+        InputError::InvalidSlaveAddress { address: 0 }
+    );
+
+    let mut xy = Xy::new(MockTransport::new(vec![]), Model::Xy7025);
+    for result in [
+        xy.set_voltage(f32::NAN),
+        xy.set_voltage(f32::INFINITY),
+        xy.set_voltage(70.01),
+        xy.set_current_limit(25.01),
+        xy.set_backlight(0),
+        xy.set_backlight(6),
+        xy.set_sleep_minutes(10),
+        xy.set_slave_address(0),
+        xy.set_slave_address(248),
+        xy.recall_group(10),
+    ] {
+        assert!(matches!(result, Err(XyError::Input(_))));
+    }
+}
+
+#[test]
+fn paired_register_conversions_round_trip_every_precision_boundary() {
+    for scale in [100.0, 1000.0] {
+        for raw in [0, 1, 16_777_217, 420_000_001, u32::MAX] {
+            let value = from_reg_u32(raw as u16, (raw >> 16) as u16, scale);
+            let words = to_reg_u32(value, scale, u32::MAX as f64 / scale, "fixture").unwrap();
+            let round_trip = ((words.high as u32) << 16) | words.low as u32;
+            assert_eq!(round_trip, raw, "scale={scale}, raw={raw}");
+        }
+    }
+}
+
+#[test]
 fn verify_model_match_for_xy7025() {
-    // Configured Xy7025 (expected code 0x6500); device reports 0x6500 → Match.
     let mut xy = Xy::new(
-        MockTransport::new(vec![Op::Read {
-            addr: REG_MODEL,
-            values: vec![0x6500],
-        }]),
+        MockTransport::new(vec![
+            Op::Read {
+                addr: REG_MODEL,
+                values: vec![0x6500],
+            },
+            Op::Read {
+                addr: REG_MODEL,
+                values: vec![0x6100],
+            },
+        ]),
         Model::Xy7025,
     );
     assert_eq!(
@@ -623,12 +753,16 @@ fn verify_model_match_for_xy7025() {
             device_code: 0x6500
         }
     );
+    assert_eq!(
+        xy.verify_model().unwrap(),
+        ModelCheck::Match {
+            device_code: 0x6100
+        }
+    );
 }
 
 #[test]
-fn verify_model_mismatch_when_codes_differ() {
-    // Configured XY7025 (expected 0x6500) but device reports a foreign
-    // code → Mismatch (the dangerous case the API exists to surface).
+fn verify_model_is_inconclusive_for_unknown_code() {
     let mut xy = Xy::new(
         MockTransport::new(vec![Op::Read {
             addr: REG_MODEL,
@@ -638,9 +772,8 @@ fn verify_model_mismatch_when_codes_differ() {
     );
     assert_eq!(
         xy.verify_model().unwrap(),
-        ModelCheck::Mismatch {
-            expected_code: 0x6500,
-            device_code: 0x7700,
+        ModelCheck::Inconclusive {
+            device_code: 0x7700
         }
     );
 }
@@ -652,11 +785,7 @@ fn verify_model_inconclusive_for_custom() {
             addr: REG_MODEL,
             values: vec![0x6500],
         }]),
-        Model::Custom {
-            current_scale: 100,
-            power_scale: 10,
-            opp_scale: 1,
-        },
+        custom_model(100, 10, 1),
     );
     assert_eq!(
         xy.verify_model().unwrap(),

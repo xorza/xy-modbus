@@ -1,8 +1,6 @@
 //! Live readings, setpoints, and cumulative counters.
 
-use super::enums::{ProtectionStatus, RegMode};
-
-// ─── Setpoints ───────────────────────────────────────────────────────────────
+use crate::types::enums::{ProtectionStatus, RegMode};
 
 /// Output voltage / current setpoints (registers 0x0000–0x0001).
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -12,8 +10,6 @@ pub struct Setpoints {
     pub v_set: f32,
     pub i_set: f32,
 }
-
-// ─── Status ──────────────────────────────────────────────────────────────────
 
 /// Live + control snapshot covering registers 0x0000–0x0012 in a single
 /// 19-register transaction. Returns everything a supervisor needs each
@@ -38,8 +34,6 @@ pub struct Status {
     pub output_on: bool,
 }
 
-// ─── OnTime ──────────────────────────────────────────────────────────────────
-
 /// Output-on time as reported by the device (h/m/s).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -56,8 +50,6 @@ impl OnTime {
     }
 }
 
-// ─── Totals ──────────────────────────────────────────────────────────────────
-
 /// Cumulative output counters and on-time (registers 0x0006–0x000C).
 ///
 /// Charge and energy are composed from 32-bit low/high register pairs.
@@ -68,35 +60,30 @@ impl OnTime {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Totals {
     /// Cumulative output charge in Ah.
-    pub charge_ah: f32,
+    pub charge_ah: f64,
     /// Cumulative output energy in Wh.
-    pub energy_wh: f32,
+    pub energy_wh: f64,
     /// Output-on time, accumulated.
     pub on_time: OnTime,
 }
 
-// ─── Temperatures ────────────────────────────────────────────────────────────
-
 /// Temperature readings from registers `0x000D` (T-IN) and `0x000E` (T-EX),
-/// in the unit selected by [`super::TempUnit`].
+/// in the unit selected by [`crate::TempUnit`].
 ///
 /// `internal` is the on-board sensor — verified on XY7025 hardware.
 ///
-/// `_external_unverified` is the optional external probe input. With no
-/// thermistor connected the field reads `888.8` as a sentinel; the
+/// `external` is the optional external probe input. With no thermistor
+/// connected the register reads `888.8` as a sentinel; the
 /// decoding scale for a *connected* probe has not been verified on real
-/// hardware. The leading underscore is a deliberate marker — treat the
-/// value as advisory until you've cross-checked it against a known
-/// reference temperature on your unit.
+/// hardware. Treat the value as advisory until it has been cross-checked
+/// against a known reference temperature on the target unit.
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Temperatures {
     pub internal: f32,
-    pub _external_unverified: f32,
+    pub external: Option<f32>,
 }
-
-// ─── SafetyLimits ────────────────────────────────────────────────────────────
 
 /// Hard trip limits programmed into the buck's protection registers.
 #[derive(Copy, Clone, Debug, PartialEq)]

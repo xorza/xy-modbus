@@ -13,8 +13,8 @@
 //! let mut xy = Xy::new(transport, Model::Xy7025);
 //! ```
 //!
-//! Timing defaults match the XY-series spec (~500 ms response window,
-//! ~50 ms post-write quiet gap). Override with [`UartTransport::with_timing`].
+//! Timing defaults use a 500 ms per-read inactivity timeout and a 50 ms
+//! inter-frame gap. Override with [`UartTransport::with_timing`].
 
 use embedded_hal::delay::DelayNs;
 use embedded_io::Write;
@@ -24,14 +24,33 @@ use crate::framing::{
     build_write_multiple_request, build_write_single_request, parse_read_response,
     parse_write_multiple_response, parse_write_single_response,
 };
-use crate::transport::{BlockingRead, ModbusTransport, RtuError};
+use crate::transport::{IoOperation, ModbusTransport, RtuError};
 
 // `write_multiple_holdings` builds the request frame into `self.buf` and
 // `expect`s success — sound only because the buffer fits the largest
 // possible Write Multiple frame (slave + fc + addr + qty + bc + 2*regs + crc).
 const _: () = assert!(MAX_ADU >= 9 + 2 * MAX_WRITE_REGS);
 
-// ─── UartTransport ───────────────────────────────────────────────────────────
+/// Read side of [`UartTransport`].
+///
+/// Wraps a UART driver that already knows how to block efficiently for
+/// incoming bytes. Avoiding `embedded_io::ReadReady` is deliberate: many
+/// kernel-backed HALs do not implement it and already block cheaply.
+pub trait BlockingRead {
+    type Error;
+
+    /// Block for up to `timeout_ms` waiting for at least one byte, then
+    /// return up to `buf.len()` bytes. `Ok(0)` means no byte arrived.
+    /// A zero timeout is a non-blocking poll used for the pre-TX flush.
+    fn read(&mut self, buf: &mut [u8], timeout_ms: u32) -> Result<usize, Self::Error>;
+}
+
+/// Values recovered from [`UartTransport::into_parts`].
+#[derive(Debug)]
+pub struct UartParts<U, D> {
+    pub uart: U,
+    pub delay: D,
+}
 
 /// Generic Modbus-RTU transport over any blocking-with-timeout UART.
 ///
@@ -43,7 +62,7 @@ const _: () = assert!(MAX_ADU >= 9 + 2 * MAX_WRITE_REGS);
 pub struct UartTransport<U, D> {
     uart: U,
     delay: D,
-    response_timeout_ms: u32,
+    read_timeout_ms: u32,
     inter_frame_ms: u32,
     buf: [u8; MAX_ADU],
 }
@@ -53,29 +72,31 @@ where
     U: BlockingRead + Write,
     D: DelayNs,
 {
-    /// Build a transport with default XY-series timing
-    /// (500 ms response window, 50 ms inter-frame quiet gap).
+    /// Build a transport with a 500 ms per-read inactivity timeout and
+    /// 50 ms inter-frame quiet gap.
     pub fn new(uart: U, delay: D) -> Self {
         Self {
             uart,
             delay,
-            response_timeout_ms: 500,
+            read_timeout_ms: 500,
             inter_frame_ms: 50,
             buf: [0u8; MAX_ADU],
         }
     }
 
-    /// Override the response timeout (max wait without any byte arriving)
-    /// and the inter-frame quiet gap.
-    pub fn with_timing(mut self, response_timeout_ms: u32, inter_frame_ms: u32) -> Self {
-        self.response_timeout_ms = response_timeout_ms;
+    /// Override the per-read inactivity timeout and inter-frame quiet gap.
+    pub fn with_timing(mut self, read_timeout_ms: u32, inter_frame_ms: u32) -> Self {
+        self.read_timeout_ms = read_timeout_ms;
         self.inter_frame_ms = inter_frame_ms;
         self
     }
 
     /// Recover the inner UART and delay.
-    pub fn release(self) -> (U, D) {
-        (self.uart, self.delay)
+    pub fn into_parts(self) -> UartParts<U, D> {
+        UartParts {
+            uart: self.uart,
+            delay: self.delay,
+        }
     }
 
     /// Enforce ≥t3.5 bus silence before the next master frame, then
@@ -85,9 +106,6 @@ where
         drain_rx(&mut self.uart);
     }
 }
-
-// ─── Free helpers (take `&mut U` so the buffer in `UartTransport` ──────────
-//                  can be borrowed disjointly with the UART)
 
 /// Discard whatever is already in the UART RX buffer. Cheap
 /// non-blocking calls (`timeout_ms = 0`) drain noise that arrived during
@@ -113,33 +131,44 @@ fn drain_rx<U: BlockingRead>(uart: &mut U) {
 fn write_all<U: Write>(uart: &mut U, mut buf: &[u8]) -> Result<(), RtuError> {
     while !buf.is_empty() {
         match uart.write(buf) {
-            Ok(0) => return Err(RtuError::Io),
+            Ok(0) => {
+                return Err(RtuError::Io {
+                    operation: IoOperation::Write,
+                });
+            }
             Ok(n) => buf = &buf[n..],
-            Err(_) => return Err(RtuError::Io),
+            Err(_) => {
+                return Err(RtuError::Io {
+                    operation: IoOperation::Write,
+                });
+            }
         }
     }
-    uart.flush().map_err(|_| RtuError::Io)?;
+    uart.flush().map_err(|_| RtuError::Io {
+        operation: IoOperation::Flush,
+    })?;
     Ok(())
 }
 
 /// Fill `buf` from the UART, treating "no bytes within
-/// `response_timeout_ms`" as a timeout. Each `read` call gets a fresh
-/// timeout — a slave that starts replying mid-window has the rest of
-/// its frame protected by the next read's full budget. Worst-case
-/// wall-clock is a small multiple of `response_timeout_ms` only if the
-/// slave dribbles bytes with timeout-length pauses between them, which
-/// no real Modbus device does.
+/// `read_timeout_ms`" as a timeout. Each `read` call gets a fresh
+/// timeout. This currently acts as an inactivity timeout rather than an
+/// overall transaction deadline.
 fn read_exact<U: BlockingRead>(
     uart: &mut U,
     buf: &mut [u8],
-    response_timeout_ms: u32,
+    read_timeout_ms: u32,
 ) -> Result<(), RtuError> {
     let mut filled = 0;
     while filled < buf.len() {
-        match uart.read(&mut buf[filled..], response_timeout_ms) {
+        match uart.read(&mut buf[filled..], read_timeout_ms) {
             Ok(0) => return Err(RtuError::Timeout),
             Ok(n) => filled += n,
-            Err(_) => return Err(RtuError::Io),
+            Err(_) => {
+                return Err(RtuError::Io {
+                    operation: IoOperation::Read,
+                });
+            }
         }
     }
     Ok(())
@@ -151,21 +180,19 @@ fn read_response<'b, U: BlockingRead>(
     uart: &mut U,
     buf: &'b mut [u8],
     full_len: usize,
-    response_timeout_ms: u32,
+    read_timeout_ms: u32,
 ) -> Result<&'b [u8], RtuError> {
     assert!(full_len >= 5 && full_len <= buf.len());
-    read_exact(uart, &mut buf[..3], response_timeout_ms)?;
+    read_exact(uart, &mut buf[..3], read_timeout_ms)?;
     if buf[1] & EXCEPTION_BIT != 0 {
-        read_exact(uart, &mut buf[3..5], response_timeout_ms)?;
+        read_exact(uart, &mut buf[3..5], read_timeout_ms)?;
         return Ok(&buf[..5]);
     }
     if full_len > 3 {
-        read_exact(uart, &mut buf[3..full_len], response_timeout_ms)?;
+        read_exact(uart, &mut buf[3..full_len], read_timeout_ms)?;
     }
     Ok(&buf[..full_len])
 }
-
-// ─── ModbusTransport impl ────────────────────────────────────────────────────
 
 impl<U, D> ModbusTransport for UartTransport<U, D>
 where
@@ -176,7 +203,7 @@ where
         assert!(slave != 0, "read does not support broadcast");
         assert!(!dst.is_empty() && dst.len() <= MAX_READ_REGS);
         let count = dst.len() as u16;
-        let req = build_read_request(slave, addr, count);
+        let req = build_read_request(slave, addr, count).expect("register count validated above");
         let expected_len = 5 + 2 * dst.len();
 
         self.pre_tx_silence();
@@ -186,7 +213,7 @@ where
             &mut self.uart,
             &mut self.buf,
             expected_len,
-            self.response_timeout_ms,
+            self.read_timeout_ms,
         )?;
         parse_read_response(resp, slave, dst)?;
         Ok(())
@@ -202,7 +229,7 @@ where
         self.pre_tx_silence();
         write_all(&mut self.uart, &req)?;
 
-        let resp = read_response(&mut self.uart, &mut self.buf, 8, self.response_timeout_ms)?;
+        let resp = read_response(&mut self.uart, &mut self.buf, 8, self.read_timeout_ms)?;
         parse_write_single_response(resp, &req)?;
         Ok(())
     }
@@ -227,7 +254,7 @@ where
         self.pre_tx_silence();
         write_all(&mut self.uart, &self.buf[..n])?;
 
-        let resp = read_response(&mut self.uart, &mut self.buf, 8, self.response_timeout_ms)?;
+        let resp = read_response(&mut self.uart, &mut self.buf, 8, self.read_timeout_ms)?;
         parse_write_multiple_response(resp, slave, addr, values.len() as u16)?;
         Ok(())
     }

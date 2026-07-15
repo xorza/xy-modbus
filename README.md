@@ -29,8 +29,9 @@ let s = xy.read_status()?;
 
 `Model` selects per-register scales for I-OUT, POWER, S-OCP, S-OPP —
 the wrong family silently shifts current and power readings by 10×.
-Call `xy.verify_model()?` at boot to catch a misconfiguration against
-the device's `MODEL` register.
+Call `xy.verify_model()?` at boot to confirm a recognized model code.
+Unknown codes return `ModelCheck::Inconclusive` rather than guessing at
+a scale family.
 
 ## Transport
 

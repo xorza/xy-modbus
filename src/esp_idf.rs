@@ -21,9 +21,8 @@ use esp_idf_hal::io::EspIOError;
 use esp_idf_hal::uart::UartDriver;
 
 use crate::device::Xy;
-use crate::transport::BlockingRead;
-use crate::types::Model;
-use crate::uart::UartTransport;
+use crate::types::model::Model;
+use crate::uart::{BlockingRead, UartTransport};
 
 impl BlockingRead for UartDriver<'_> {
     type Error = EspIOError;

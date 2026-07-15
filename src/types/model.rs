@@ -1,5 +1,7 @@
 //! Hardware variant presets and per-model register scales.
 
+use core::num::NonZeroU16;
+
 /// Hardware variant. Selected at construction (`Xy::new`) and used to
 /// scale the registers whose resolution differs across the family —
 /// I-SET, IOUT, S-OCP, POWER, S-OPP. See `DATASHEET.md` §3 for the
@@ -21,70 +23,95 @@ pub enum Model {
     /// denominators on every known variant; cross-check against the
     /// vendor docs for your unit.
     Custom {
-        current_scale: u16,
-        power_scale: u16,
-        opp_scale: u16,
+        current_scale: NonZeroU16,
+        power_scale: NonZeroU16,
+        opp_scale: NonZeroU16,
     },
 }
 
 impl Model {
     /// Scale for I-SET, IOUT, S-OCP. 100 on XY7025 (10 mA).
-    pub const fn current_scale(self) -> f32 {
+    pub(crate) const fn current_scale(self) -> f32 {
         match self {
             Self::Xy7025 => 100.0,
-            Self::Custom { current_scale, .. } => current_scale as f32,
+            Self::Custom { current_scale, .. } => current_scale.get() as f32,
         }
     }
 
     /// Scale for POWER (`0x0004`). 10 on XY7025 (100 mW).
-    pub const fn power_scale(self) -> f32 {
+    pub(crate) const fn power_scale(self) -> f32 {
         match self {
             Self::Xy7025 => 10.0,
-            Self::Custom { power_scale, .. } => power_scale as f32,
+            Self::Custom { power_scale, .. } => power_scale.get() as f32,
         }
     }
 
     /// Scale for S-OPP in memory groups (`0x0055`). 1 W on XY7025.
-    pub const fn opp_scale(self) -> f32 {
+    pub(crate) const fn opp_scale(self) -> f32 {
         match self {
             Self::Xy7025 => 1.0,
-            Self::Custom { opp_scale, .. } => opp_scale as f32,
+            Self::Custom { opp_scale, .. } => opp_scale.get() as f32,
         }
     }
 
-    /// Expected value of the device's `MODEL` register (`0x0016`) for
-    /// this variant, if known. Used by [`crate::Xy::verify_model`] to
-    /// catch wrong-scale-family misconfiguration.
-    ///
-    /// XY7025 returns `0x6500`. `Custom` returns `None` (no canonical code).
-    pub const fn expected_model_code(self) -> Option<u16> {
+    pub(crate) const fn recognizes_model_code(self, code: u16) -> bool {
         match self {
-            Self::Xy7025 => Some(0x6500),
-            Self::Custom { .. } => None,
+            Self::Xy7025 => matches!(code, 0x6100 | 0x6500),
+            Self::Custom { .. } => false,
+        }
+    }
+
+    pub(crate) const fn max_voltage_set(self) -> f32 {
+        match self {
+            Self::Xy7025 => 70.0,
+            Self::Custom { .. } => u16::MAX as f32 / 100.0,
+        }
+    }
+
+    pub(crate) const fn max_current_set(self) -> f32 {
+        match self {
+            Self::Xy7025 => 25.0,
+            Self::Custom { current_scale, .. } => u16::MAX as f32 / current_scale.get() as f32,
+        }
+    }
+
+    pub(crate) const fn max_lvp(self) -> f32 {
+        match self {
+            Self::Xy7025 => 95.0,
+            Self::Custom { .. } => u16::MAX as f32 / 100.0,
+        }
+    }
+
+    pub(crate) const fn max_ovp(self) -> f32 {
+        match self {
+            Self::Xy7025 => 72.0,
+            Self::Custom { .. } => u16::MAX as f32 / 100.0,
+        }
+    }
+
+    pub(crate) const fn max_ocp(self) -> f32 {
+        match self {
+            Self::Xy7025 => 27.0,
+            Self::Custom { current_scale, .. } => u16::MAX as f32 / current_scale.get() as f32,
+        }
+    }
+
+    pub(crate) const fn max_opp(self) -> f32 {
+        match self {
+            Self::Xy7025 => 2000.0,
+            Self::Custom { opp_scale, .. } => u16::MAX as f32 / opp_scale.get() as f32,
         }
     }
 }
 
-// ─── ModelCheck ──────────────────────────────────────────────────────────────
-
-/// Outcome of [`crate::Xy::verify_model`]. `Mismatch` is the dangerous
-/// case — readings WILL be off by 10× until the configured [`Model`] is
-/// changed to match the hardware.
+/// Outcome of [`crate::Xy::verify_model`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ModelCheck {
     /// Device's `MODEL` register matches the configured model's family.
     Match { device_code: u16 },
-    /// Device reports a code mapped to a different scale family. The
-    /// configured [`Model`] is wrong for this hardware; readings will
-    /// be off until it's corrected.
-    Mismatch {
-        expected_code: u16,
-        device_code: u16,
-    },
-    /// Verification was not possible: either the device returned a
-    /// code outside the documented set, or the configured model is
-    /// `Custom` (no canonical expected code).
+    /// Verification was not possible because the device returned an
+    /// unknown code or the configured model is `Custom`.
     Inconclusive { device_code: u16 },
 }

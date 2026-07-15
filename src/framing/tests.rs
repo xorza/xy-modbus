@@ -27,7 +27,7 @@ fn crc_detects_bit_flips() {
 
 #[test]
 fn build_read_matches_known() {
-    let req = build_read_request(0x01, 0x001F, 1);
+    let req = build_read_request(0x01, 0x001F, 1).unwrap();
     assert_eq!(req, [0x01, 0x03, 0x00, 0x1F, 0x00, 0x01, 0xB5, 0xCC]);
 }
 
@@ -219,10 +219,22 @@ fn parse_write_multiple_rejects_fc_mismatch() {
 /// would be 5 + 250 = 255 bytes — fits inside MAX_ADU.
 #[test]
 fn build_read_at_max_count_is_well_formed() {
-    let req = build_read_request(0x01, 0x0000, MAX_READ_REGS as u16);
+    let req = build_read_request(0x01, 0x0000, MAX_READ_REGS as u16).unwrap();
     assert_eq!(u16::from_be_bytes([req[4], req[5]]), 125);
     let crc = u16::from_le_bytes([req[6], req[7]]);
     assert_eq!(crc, crc16_modbus(&req[..6]));
+}
+
+#[test]
+fn build_read_rejects_invalid_counts() {
+    assert_eq!(
+        build_read_request(0x01, 0x0000, 0),
+        Err(FrameError::InvalidLength(0))
+    );
+    assert_eq!(
+        build_read_request(0x01, 0x0000, MAX_READ_REGS as u16 + 1),
+        Err(FrameError::InvalidLength(MAX_READ_REGS + 1))
+    );
 }
 
 /// Write Multiple at the maximum count (123) needs 9 + 246 = 255 bytes.
@@ -304,6 +316,25 @@ fn frame_error_display_strings() {
 }
 
 #[test]
+fn modbus_error_display_strings() {
+    use std::format;
+    assert_eq!(
+        format!("{}", ModbusError::ShortResponse(3)),
+        "short response (3 bytes)"
+    );
+    assert_eq!(
+        format!("{}", ModbusError::BadSlave(0x02)),
+        "wrong slave id 0x02"
+    );
+    assert_eq!(format!("{}", ModbusError::BadHeader), "malformed header");
+    assert_eq!(format!("{}", ModbusError::BadCrc), "CRC mismatch");
+    assert_eq!(
+        format!("{}", ModbusError::Exception(0x03)),
+        "modbus exception 0x03"
+    );
+}
+
+#[test]
 fn parse_write_multiple_rejects_addr_mismatch() {
     let mut frame = [0x01u8, 0x10, 0x00, 0x52, 0x00, 0x03, 0, 0];
     let crc = crc16_modbus(&frame[..6]);
@@ -313,4 +344,41 @@ fn parse_write_multiple_rejects_addr_mismatch() {
         parse_write_multiple_response(&frame, 0x01, 0x0050, 3),
         Err(ModbusError::BadHeader)
     ));
+}
+
+#[test]
+fn parsers_reject_trailing_bytes() {
+    let mut read = read_resp(0x01, &[0x1234]);
+    read.push(0);
+    let mut out = [0u16; 1];
+    assert_eq!(
+        parse_read_response(&read, 0x01, &mut out),
+        Err(ModbusError::BadHeader)
+    );
+
+    let req = build_write_single_request(0x01, 0x0012, 1);
+    let mut write = req.to_vec();
+    write.push(0);
+    assert_eq!(
+        parse_write_single_response(&write, &req),
+        Err(ModbusError::BadHeader)
+    );
+}
+
+#[test]
+fn parse_read_rejects_exception_for_another_function() {
+    let frame = frame_with_crc_for_test(&[0x01, FN_WRITE_SINGLE | EXCEPTION_BIT, 0x02]);
+    let mut out = [0u16; 1];
+    assert_eq!(
+        parse_read_response(&frame, 0x01, &mut out),
+        Err(ModbusError::BadHeader)
+    );
+}
+
+fn frame_with_crc_for_test(bytes: &[u8]) -> std::vec::Vec<u8> {
+    let mut frame = bytes.to_vec();
+    let crc = crc16_modbus(&frame);
+    frame.push(crc as u8);
+    frame.push((crc >> 8) as u8);
+    frame
 }

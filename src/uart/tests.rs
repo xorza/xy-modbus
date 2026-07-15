@@ -5,12 +5,12 @@ use std::vec::Vec;
 use embedded_io::ErrorType;
 
 use super::*;
-use crate::framing::crc16_modbus;
-use crate::transport::{BlockingRead, ModbusError};
+use crate::framing::{ModbusError, crc16_modbus};
 
 /// Mock UART: `stale` bytes are visible immediately (simulating
 /// junk in the RX FIFO before the request); `response` bytes only
 /// become available after the first byte is written.
+#[derive(Debug)]
 struct MockUart {
     tx: Vec<u8>,
     stale: Vec<u8>,
@@ -75,6 +75,7 @@ impl embedded_io::Write for MockUart {
     }
 }
 
+#[derive(Debug)]
 struct NoDelay;
 impl DelayNs for NoDelay {
     fn delay_ns(&mut self, _: u32) {}
@@ -99,9 +100,9 @@ fn read_holding_round_trip() {
     assert_eq!(out, [10, 20, 30]);
 
     // Verify the request that went out matches the canonical encoding.
-    let (uart, _) = t.release();
-    let expected_req = build_read_request(0x01, 0x0000, 3);
-    assert_eq!(uart.tx, expected_req);
+    let parts = t.into_parts();
+    let expected_req = build_read_request(0x01, 0x0000, 3).unwrap();
+    assert_eq!(parts.uart.tx, expected_req);
 }
 
 #[test]
@@ -144,6 +145,7 @@ fn timeout_when_no_data() {
 }
 
 /// UART that records every `delay_ms` for assertions on timing.
+#[derive(Debug)]
 struct CountingDelay {
     total_ms: u32,
 }
@@ -154,9 +156,11 @@ impl DelayNs for CountingDelay {
 }
 
 /// UART that fails (read or write) on demand.
+#[derive(Debug)]
 struct FailingUart {
     fail_read: bool,
     fail_write: bool,
+    fail_flush: bool,
     write_returns_zero: bool,
     response: Vec<u8>,
     resp_pos: usize,
@@ -192,7 +196,11 @@ impl embedded_io::Write for FailingUart {
         Ok(buf.len())
     }
     fn flush(&mut self) -> Result<(), Self::Error> {
-        Ok(())
+        if self.fail_flush {
+            Err(embedded_io::ErrorKind::Other)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -230,6 +238,7 @@ fn write_returning_zero_is_io_error() {
     let uart = FailingUart {
         fail_read: false,
         fail_write: false,
+        fail_flush: false,
         write_returns_zero: true,
         response: Vec::new(),
         resp_pos: 0,
@@ -239,7 +248,9 @@ fn write_returning_zero_is_io_error() {
     let mut out = [0u16; 1];
     assert_eq!(
         t.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
-        RtuError::Io
+        RtuError::Io {
+            operation: IoOperation::Write
+        }
     );
 }
 
@@ -248,6 +259,7 @@ fn write_error_is_io_error() {
     let uart = FailingUart {
         fail_read: false,
         fail_write: true,
+        fail_flush: false,
         write_returns_zero: false,
         response: Vec::new(),
         resp_pos: 0,
@@ -256,7 +268,29 @@ fn write_error_is_io_error() {
     let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
     assert_eq!(
         t.write_single_holding(0x01, 0x0012, 0x0001).unwrap_err(),
-        RtuError::Io
+        RtuError::Io {
+            operation: IoOperation::Write
+        }
+    );
+}
+
+#[test]
+fn flush_error_identifies_flush_operation() {
+    let uart = FailingUart {
+        fail_read: false,
+        fail_write: false,
+        fail_flush: true,
+        write_returns_zero: false,
+        response: Vec::new(),
+        resp_pos: 0,
+        armed: false,
+    };
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    assert_eq!(
+        t.write_single_holding(0x01, 0x0012, 0x0001).unwrap_err(),
+        RtuError::Io {
+            operation: IoOperation::Flush
+        }
     );
 }
 
@@ -266,6 +300,7 @@ fn read_error_mid_frame_is_io_error() {
     let uart = FailingUart {
         fail_read: true,
         fail_write: false,
+        fail_flush: false,
         write_returns_zero: false,
         response: std::vec![0xAA],
         resp_pos: 0,
@@ -275,7 +310,9 @@ fn read_error_mid_frame_is_io_error() {
     let mut out = [0u16; 1];
     assert_eq!(
         t.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
-        RtuError::Io
+        RtuError::Io {
+            operation: IoOperation::Read
+        }
     );
 }
 
@@ -288,7 +325,7 @@ fn pre_tx_silence_applies_inter_frame_gap() {
     let mut t = UartTransport::new(uart, CountingDelay { total_ms: 0 }).with_timing(50, 7);
     let mut out = [0u16; 1];
     t.read_holding(0x01, 0x0000, &mut out).unwrap();
-    let (_, delay) = t.release();
+    let delay = t.into_parts().delay;
     // Exactly one pre-TX silence of 7 ms; no other delay_ms calls on the
     // happy path (response is ready immediately, so read_exact never sleeps).
     assert_eq!(delay.total_ms, 7);
@@ -324,6 +361,7 @@ fn slave_zero_panics_on_write_multiple() {
 /// that drain incrementally.
 #[test]
 fn read_exact_aggregates_byte_at_a_time() {
+    #[derive(Debug)]
     struct DribbleUart {
         response: Vec<u8>,
         pos: usize,
@@ -382,10 +420,10 @@ fn exception_short_circuits_read() {
 }
 
 #[test]
-fn release_returns_inner_uart_and_delay() {
+fn into_parts_returns_inner_uart_and_delay() {
     let uart = MockUart::new(Vec::new());
     let t = UartTransport::new(uart, NoDelay).with_timing(123, 7);
-    let (uart, _delay) = t.release();
+    let uart = t.into_parts().uart;
     // Sanity: tx buffer is empty, no traffic happened.
     assert!(uart.tx.is_empty());
 }
