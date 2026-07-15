@@ -92,8 +92,8 @@ testing of the XY7025 and the bundled transport (`src/uart/mod.rs`):
 
 | Constraint           | Value            | Notes                                                                                                                                                                                        |
 | -------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Min inter-frame gap  | ~50 ms           | Tighter and the device drops back-to-back frames; confirmed by [Jens's header](docs-archive/jens3382-xy6020l.h#L149)                                                                         |
-| Response timeout     | ~500 ms          | Worst case observed on XY7025; 200 ms is unreliable. [Jens's XY6020L library](docs-archive/jens3382-xy6020l.cpp) runs tighter (~40 ms) — XY7025 firmware appears to be the slower of the two |
+| Min inter-frame gap  | ~50 ms           | Tighter and the device drops back-to-back frames; confirmed by [Jens's header](https://github.com/xorza/xy-modbus/blob/master/docs-archive/jens3382-xy6020l.h#L148)                                                                         |
+| Response timeout     | ~500 ms          | Worst case observed on XY7025; 200 ms is unreliable. [Jens's XY6020L library](https://github.com/xorza/xy-modbus/blob/master/docs-archive/jens3382-xy6020l.cpp) runs tighter (~40 ms) — XY7025 firmware appears to be the slower of the two |
 | Post-write quiet gap | ~10 ms           | Required before a follow-up read of the same reg                                                                                                                                             |
 | Cold-boot UART ready | ~1–2 s after Vin | Slower without USB-CDC enumeration delay to mask                                                                                                                                             |
 
@@ -111,7 +111,7 @@ physical value (so `1440` with scale `100` = `14.40 V`).
 > **Model-specific scales — important.** The scale columns below are for
 > XY6020L and XY7025. The SK family uses **higher-resolution scales** for
 > current and power (and adds extra registers — see §3.6). Per the csvke
-> [SK120 register PDF](docs-archive/csvke-XY-SK120-Modbus_Address.pdf):
+> [SK120 register PDF](https://github.com/xorza/xy-modbus/blob/master/docs-archive/csvke-XY-SK120-Modbus_Address.pdf):
 >
 > | Register         | XY6020L / XY7025 scale | SK120 / SK60 / SK120X scale |
 > | ---------------- | ---------------------- | --------------------------- |
@@ -163,8 +163,8 @@ physical value (so `1440` with scale `100` = `14.40 V`).
 
 ### 3.2 SK-family extras (`0x001F – 0x0023`)
 
-Documented in the [SK120 register PDF](docs-archive/csvke-XY-SK120-Modbus_Address.pdf)
-p.1 and exercised by the [archived csvke README](docs-archive/csvke-README.md#L116-L156). **Not present** on XY6020L per
+Documented in the [SK120 register PDF](https://github.com/xorza/xy-modbus/blob/master/docs-archive/csvke-XY-SK120-Modbus_Address.pdf)
+p.1 and exercised by the [archived csvke README](https://github.com/xorza/xy-modbus/blob/master/docs-archive/csvke-README.md#L148-L153). **Not present** on XY6020L per
 the tinkering4fun PDF (which ends at `0x001E`). The XY7025 marketing
 material advertises both MPPT and constant-power modes, so these
 registers are likely present on XY7025 too — but unverified at the
@@ -272,7 +272,7 @@ recalled.
 ### 3.6 Baud-rate codes (`0x0019` BAUDRATE_L)
 
 The seller manual documents `6 == 115200` only. No primary source in
-this archive maps the other codes — [Jens Gleissberg's library](docs-archive/jens3382-xy6020l.h#L230-L232)
+this archive maps the other codes — [Jens Gleissberg's library](https://github.com/xorza/xy-modbus/blob/master/docs-archive/jens3382-xy6020l.h#L230-L231)
 explicitly notes "no read option …
 @todo: provide enum", and the csvke files contain no baud-code
 mapping either. The mapping below is **community speculation** and was
@@ -324,7 +324,7 @@ blinks, and the LCD shows the trip code. Writing `0` to `PROTECT`
 **OVP-on-V-SET-write quirk.** If you write a `V-SET` higher than the
 current `S-OVP`, the device latches OVP immediately, even if the output
 is off. Always program `S-OVP` (`0x0053`) before raising `V-SET`.
-Documented in the [original seller manual](docs-archive/tinkering4fun-XY6020L-Modbus-Interface.pdf)
+Documented in the [original seller manual](https://github.com/xorza/xy-modbus/blob/master/docs-archive/tinkering4fun-XY6020L-Modbus-Interface.pdf)
 p.6, Note 3: "OVP is triggered when a programming request for a
 higher voltage is made (e.g. write to register V-SET 0000H)".
 
@@ -353,24 +353,28 @@ for byte b in frame:
 
 Request:
 
-```
-01 03 00 02 00 02 65 CB
-│  │  └──┬─┘ └──┬─┘ └─┬─┘
-│  │   start    qty    CRC (lo, hi)
-│  └─ FC = 03 (read holding)
-└──── slave 0x01
-```
+`01 03 00 02 00 02 65 CB`
+
+| Offset | Bytes   | Meaning                                      |
+|--------|---------|----------------------------------------------|
+| 0      | `01`    | Slave `0x01`                                 |
+| 1      | `03`    | Read Holding Registers                       |
+| 2–3    | `00 02` | Starting register `0x0002` (`VOUT`)          |
+| 4–5    | `00 02` | Quantity: 2 registers                        |
+| 6–7    | `65 CB` | CRC `0xCB65`, transmitted low byte first     |
 
 Response (Vout=5.00 V, Iout=0.00 A):
 
-```
-01 03 04 01 F4 00 00 BA 3D
-│  │  │  └──┬─┘ └──┬─┘ └─┬─┘
-│  │  │   reg2    reg3   CRC
-│  │  └── byte count = 4
-│  └─ FC echo
-└──── slave
-```
+`01 03 04 01 F4 00 00 BA 3D`
+
+| Offset | Bytes   | Meaning                                      |
+|--------|---------|----------------------------------------------|
+| 0      | `01`    | Slave `0x01`                                 |
+| 1      | `03`    | Function-code echo                           |
+| 2      | `04`    | Payload byte count: 4                        |
+| 3–4    | `01 F4` | Register `0x0002`: `VOUT = 500`              |
+| 5–6    | `00 00` | Register `0x0003`: `IOUT = 0`                |
+| 7–8    | `BA 3D` | CRC `0x3DBA`, transmitted low byte first     |
 
 `0x01F4` = 500 → 5.00 V; `0x0000` = 0 → 0.00 A.
 
@@ -378,13 +382,15 @@ Response (Vout=5.00 V, Iout=0.00 A):
 
 Encoded value `1440` = `0x05A0`:
 
-```
-01 06 00 00 05 A0 09 7E
-│  │  └──┬─┘ └──┬─┘ └─┬─┘
-│  │    addr    val    CRC
-│  └─ FC = 06
-└──── slave
-```
+`01 06 00 00 05 A0 09 7E`
+
+| Offset | Bytes   | Meaning                                      |
+|--------|---------|----------------------------------------------|
+| 0      | `01`    | Slave `0x01`                                 |
+| 1      | `06`    | Write Single Holding Register                |
+| 2–3    | `00 00` | Register `0x0000` (`V-SET`)                  |
+| 4–5    | `05 A0` | Value `1440`                                 |
+| 6–7    | `09 7E` | CRC `0x7E09`, transmitted low byte first     |
 
 Echo response is identical to the request (FC `0x06` reflects).
 
@@ -393,13 +399,19 @@ Echo response is identical to the request (FC `0x06` reflects).
 Set `S-LVP=10.00 V`, `S-OVP=15.00 V`, `S-OCP=12.50 A` in one frame
 (addresses `0x0052`–`0x0054`):
 
-```
-01 10 00 52 00 03 06 03 E8 05 DC 04 E2 <CRC>
-│  │  └──┬─┘ └──┬─┘ │  └─LVP─┘ └─OVP─┘ └─OCP─┘
-│  │    addr    qty bc   1000   1500   1250
-│  └─ FC = 0x10
-└──── slave
-```
+`01 10 00 52 00 03 06 03 E8 05 DC 04 E2 67 90`
+
+| Offset | Bytes   | Meaning                                      |
+|--------|---------|----------------------------------------------|
+| 0      | `01`    | Slave `0x01`                                 |
+| 1      | `10`    | Write Multiple Holding Registers             |
+| 2–3    | `00 52` | Starting register `0x0052` (`S-LVP`)         |
+| 4–5    | `00 03` | Quantity: 3 registers                        |
+| 6      | `06`    | Payload byte count: 6                        |
+| 7–8    | `03 E8` | `S-LVP = 1000` (`10.00 V`)                  |
+| 9–10   | `05 DC` | `S-OVP = 1500` (`15.00 V`)                  |
+| 11–12  | `04 E2` | `S-OCP = 1250` (`12.50 A`)                  |
+| 13–14  | `67 90` | CRC `0x9067`, transmitted low byte first     |
 
 ---
 

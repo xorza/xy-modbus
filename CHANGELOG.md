@@ -106,3 +106,5 @@ repository has no branch named `main`.
   actual behavior.
 - Corrected the backlight range and group-energy unit documentation, and made
   memory-group address calculation enforce its index precondition.
+- Replaced alignment-sensitive wire-frame diagrams with byte-layout tables and
+  corrected package-safe reference links and source-line anchors.

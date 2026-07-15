@@ -39,16 +39,19 @@ fn build_write_single_matches_known() {
 
 #[test]
 fn build_write_multiple_layout() {
-    // Wire-level example from README §6.3: write LVP=1000, OVP=1500,
+    // Wire-level example from DATASHEET §6: write LVP=1000, OVP=1500,
     // OCP=1250 to 0x0052..=0x0054, slave 1.
     let mut buf = [0u8; 32];
     let n = build_write_multiple_request(0x01, 0x0052, &[1000, 1500, 1250], &mut buf).unwrap();
     // 7 (header) + 6 (payload) + 2 (CRC) = 15
     assert_eq!(n, 15);
-    // Header: slave, FC, start addr, qty, byte count.
-    assert_eq!(buf[..7], [0x01, 0x10, 0x00, 0x52, 0x00, 0x03, 0x06]);
-    // Payload: 1000=0x03E8, 1500=0x05DC, 1250=0x04E2.
-    assert_eq!(buf[7..13], [0x03, 0xE8, 0x05, 0xDC, 0x04, 0xE2]);
+    assert_eq!(
+        buf[..n],
+        [
+            0x01, 0x10, 0x00, 0x52, 0x00, 0x03, 0x06, 0x03, 0xE8, 0x05, 0xDC, 0x04, 0xE2, 0x67,
+            0x90,
+        ]
+    );
 }
 
 #[test]
