@@ -119,5 +119,6 @@ const _: () = assert!(REG_OUT_S == REG_AH_LOW + 6);
 const _: () = assert!(REG_S_OVP == REG_S_LVP + 1);
 const _: () = assert!(REG_S_OCP == REG_S_LVP + 2);
 
-// `read_temperatures` (T_IN, T_EX).
+// `read_temperatures` (T_IN..TEMP_UNIT).
 const _: () = assert!(REG_T_EX == REG_T_IN + 1);
+const _: () = assert!(REG_TEMP_UNIT == REG_T_IN + 6);

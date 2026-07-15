@@ -225,6 +225,9 @@ and the power-on-output behavior.
 > reading is correct. Note: `write_multiple` (group writes) routes
 > through firmware unit conversion which clamps to 110 °C / 230 °F and
 > introduces ±1° rounding — single-register writes do neither.
+> The high-level `write_group` API converts its unit-tagged threshold to the
+> active `F-C` unit, rejects values above that limit, and returns the stored
+> group readback so callers observe any firmware rounding.
 
 ### 3.5 Memory groups M0–M9 (`0x0050 + N × 0x0010`)
 

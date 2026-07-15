@@ -70,7 +70,9 @@ pub use transport::{IoOperation, ModbusTransport, RtuError};
 pub use types::enums::{BaudRate, ProtectionStatus, RegMode, TempUnit};
 pub use types::group::GroupParams;
 pub use types::model::{Model, ModelLimits, ModelRange, ModelScales, ScaleCheck};
-pub use types::status::{OnTime, SafetyLimits, Setpoints, Status, Temperatures, Totals};
+pub use types::status::{
+    OnTime, SafetyLimits, Setpoints, Status, Temperature, Temperatures, Totals,
+};
 
 #[cfg(feature = "embedded-io")]
 pub use uart::{BlockingRead, UartParts, UartTransport};

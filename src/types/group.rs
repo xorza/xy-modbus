@@ -1,6 +1,6 @@
 //! Memory-group parameters (M0–M9).
 
-use crate::types::status::{SafetyLimits, Setpoints};
+use crate::types::status::{SafetyLimits, Setpoints, Temperature};
 
 /// All 14 registers of a memory group (M0–M9). Field order matches the
 /// on-wire register order.
@@ -27,8 +27,8 @@ pub struct GroupParams {
     pub s_oah_ah: f64,
     /// Cumulative-energy limit in Wh.
     pub s_owh_wh: f64,
-    /// Over-temperature threshold (°C/°F per [`crate::TempUnit`]).
-    pub s_otp: f32,
+    /// Over-temperature threshold and the unit in which it was specified.
+    pub s_otp: Temperature,
     /// Power-on output state. `false` = boot with output OFF, `true` = ON.
     pub power_on_output: bool,
 }

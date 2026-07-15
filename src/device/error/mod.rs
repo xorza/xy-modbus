@@ -51,6 +51,7 @@ pub enum InputError {
     OutOfRange { field: InputField },
     InvalidSlaveAddress { address: u8 },
     InvalidGroup { group: u8 },
+    VoltageSetpointAboveProtection,
 }
 
 impl fmt::Display for InputError {
@@ -62,6 +63,9 @@ impl fmt::Display for InputError {
                 write!(f, "invalid Modbus slave address {address}")
             }
             Self::InvalidGroup { group } => write!(f, "invalid memory group {group}"),
+            Self::VoltageSetpointAboveProtection => {
+                f.write_str("voltage setpoint exceeds over-voltage protection")
+            }
         }
     }
 }

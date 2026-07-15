@@ -24,8 +24,8 @@ use esp_idf_hal::uart::config::Config;
 use esp_idf_hal::units::Hertz;
 
 use xy_modbus::{
-    BaudRate, GroupParams, Model, ScaleCheck, ProtectionStatus, SafetyLimits, Setpoints, TempUnit,
-    Xy,
+    BaudRate, GroupParams, Model, ProtectionStatus, SafetyLimits, ScaleCheck, Setpoints, TempUnit,
+    Temperature, Xy,
 };
 
 const BAUD: u32 = 115200;
@@ -243,7 +243,10 @@ fn snapshot_all<'d>(xy: &mut T<'d>) -> Result<Snapshot, String> {
         s_ohp_m: 0,
         s_oah_ah: 0.0,
         s_owh_wh: 0.0,
-        s_otp: 0.0,
+        s_otp: Temperature {
+            value: 0.0,
+            unit: TempUnit::Celsius,
+        },
         power_on_output: false,
     });
     for (n, slot) in groups.iter_mut().enumerate() {
@@ -482,8 +485,8 @@ fn test_reg_mode(xy: &mut T) -> Result<(), String> {
 fn test_temperatures(xy: &mut T) -> Result<(), String> {
     let t = xy.read_temperatures().map_err(driver_error)?;
     info!(
-        "  T_INT={:.1} T_EXT={:?} (external scale unverified)",
-        t.internal, t.external,
+        "  T_INT={:.1} {:?} T_EXT={:?} (external scale unverified)",
+        t.internal.value, t.internal.unit, t.external,
     );
     Ok(())
 }
@@ -748,14 +751,13 @@ fn test_group_full_round_trip_all(xy: &mut T) -> Result<(), String> {
             s_ohp_m: n as u16 * 5,
             s_oah_ah: 1.0 + n as f64,
             s_owh_wh: 10.0 + n as f64 * 2.0,
-            // Stay ≤ 110 — firmware clamps S-OTP to 110° in the current
-            // display unit on group writes. (Driver scale is 1.)
-            s_otp: 50.0 + n as f32,
-            // (n=0..=9 => 50..=59, all within the 110° clamp.)
+            s_otp: Temperature {
+                value: 50.0 + n as f32,
+                unit: TempUnit::Celsius,
+            },
             power_on_output: n % 2 == 0,
         };
-        xy.write_group(n, &probe).map_err(driver_error)?;
-        let r = xy.read_group(n).map_err(driver_error)?;
+        let r = xy.write_group(n, &probe).map_err(driver_error)?;
         expect_approx(
             &format!("M{n} v_set"),
             probe.setpoints.v_set,
@@ -789,10 +791,11 @@ fn test_group_full_round_trip_all(xy: &mut T) -> Result<(), String> {
         // Group writes route through firmware unit conversion, which
         // introduces ±1° rounding. Single-register writes round-trip
         // exactly (see s_otp_raw_probe). Allow a 2° tolerance here.
-        if (probe.s_otp - r.s_otp).abs() > 2.0 {
+        expect_eq(&format!("M{n} s_otp unit"), probe.s_otp.unit, r.s_otp.unit)?;
+        if (probe.s_otp.value - r.s_otp.value).abs() > 2.0 {
             return Err(format!(
                 "M{n} s_otp: expected {:.1} ±2, got {:.1}",
-                probe.s_otp, r.s_otp
+                probe.s_otp.value, r.s_otp.value
             ));
         }
         expect_eq(

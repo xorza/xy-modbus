@@ -9,7 +9,9 @@ use crate::transport::{ModbusTransport, RtuError};
 use crate::types::enums::{BaudRate, ProtectionStatus, RegMode, TempUnit};
 use crate::types::group::GroupParams;
 use crate::types::model::{Model, ModelRange, ScaleCheck};
-use crate::types::status::{OnTime, SafetyLimits, Setpoints, Status, Temperatures, Totals};
+use crate::types::status::{
+    OnTime, SafetyLimits, Setpoints, Status, Temperature, Temperatures, Totals,
+};
 
 fn to_reg_u16(v: f32, scale: f32, range: ModelRange, field: InputField) -> Result<u16, InputError> {
     if !v.is_finite() {
@@ -99,6 +101,14 @@ fn decode_register<T>(
     decode: impl FnOnce(u16) -> Result<T, u16>,
 ) -> Result<T, XyError> {
     decode(value).map_err(|value| XyError::InvalidRegisterValue { register, value })
+}
+
+fn decode_u16_max(register: u16, value: u16, max: u16) -> Result<u16, XyError> {
+    if value <= max {
+        Ok(value)
+    } else {
+        Err(XyError::InvalidRegisterValue { register, value })
+    }
 }
 
 /// High-level driver for XY7025 and compatible 14-register profiles.
@@ -219,8 +229,8 @@ impl<T: ModbusTransport> Xy<T> {
             energy_wh: from_reg_u32(r[2], r[3], 1000.0),
             on_time: OnTime {
                 hours: r[4],
-                minutes: r[5],
-                seconds: r[6],
+                minutes: decode_u16_max(REG_OUT_M, r[5], 59)?,
+                seconds: decode_u16_max(REG_OUT_S, r[6], 59)?,
             },
         })
     }
@@ -331,15 +341,26 @@ impl<T: ModbusTransport> Xy<T> {
         decode_register(REG_CVCC, value, RegMode::from_reg)
     }
 
-    /// Both fields are in the unit selected by [`Self::read_temp_unit`].
-    /// See [`Temperatures`] for caveats on the external field — its
-    /// decoding scale is unverified on real hardware.
+    /// Read both sensors and their unit in one register snapshot.
+    /// See [`Temperatures`] for caveats on the external field.
     pub fn read_temperatures(&mut self) -> Result<Temperatures, XyError> {
-        let mut r = [0u16; 2];
+        const LEN: usize = (REG_TEMP_UNIT - REG_T_IN + 1) as usize;
+        let mut r = [0u16; LEN];
         self.transport.read_holding(self.slave, REG_T_IN, &mut r)?;
+        let unit = decode_register(
+            REG_TEMP_UNIT,
+            r[(REG_TEMP_UNIT - REG_T_IN) as usize],
+            TempUnit::from_reg,
+        )?;
         Ok(Temperatures {
-            internal: from_reg_u16(r[0], 10.0),
-            external: (r[1] != 8888).then(|| from_reg_u16(r[1], 10.0)),
+            internal: Temperature {
+                value: from_reg_u16(r[0], 10.0),
+                unit,
+            },
+            external: (r[1] != 8888).then(|| Temperature {
+                value: from_reg_u16(r[1], 10.0),
+                unit,
+            }),
         })
     }
 
@@ -399,13 +420,7 @@ impl<T: ModbusTransport> Xy<T> {
     /// Off-screen timeout in minutes.
     pub fn read_sleep_minutes(&mut self) -> Result<u16, XyError> {
         let value = self.read_one(REG_SLEEP)?;
-        validate_u16_max(value, 9, InputField::SleepTimeout).map_err(|_| {
-            XyError::InvalidRegisterValue {
-                register: REG_SLEEP,
-                value,
-            }
-        })?;
-        Ok(value)
+        decode_u16_max(REG_SLEEP, value, 9)
     }
     /// Set off-screen timeout in minutes. XY7025 firmware caps the
     /// stored value at 9; any write ≥10 reads back as 9. Pass 0 to
@@ -490,22 +505,37 @@ impl<T: ModbusTransport> Xy<T> {
     /// Read all 14 registers of memory group `n` (0–9).
     pub fn read_group(&mut self, n: u8) -> Result<GroupParams, XyError> {
         validate_group(n)?;
+        let unit = self.read_temp_unit()?;
+        self.read_group_in_unit(n, unit)
+    }
+
+    fn read_group_in_unit(&mut self, n: u8, unit: TempUnit) -> Result<GroupParams, XyError> {
         let mut r = [0u16; GROUP_LEN as usize];
         let addr = group_addr(n);
         self.transport.read_holding(self.slave, addr, &mut r)?;
-        decode_group(&r, self.model, addr)
+        decode_group(&r, self.model, addr, unit)
     }
 
-    /// Write all 14 registers of memory group `n` (0–9) in one bulk
-    /// transaction. For M0 this updates the live operating set;
-    /// otherwise it programs EEPROM and takes effect on
-    /// [`Self::recall_group`].
-    pub fn write_group(&mut self, n: u8, p: &GroupParams) -> Result<(), XyError> {
+    /// Write all 14 registers of memory group `n` (0–9), then return the values
+    /// stored by the device after temperature conversion and rounding.
+    ///
+    /// For M0 this updates the live operating set. If V-SET must rise above the
+    /// current S-OVP, S-OVP is raised first because FC10 application order is
+    /// unverified and XY7025 latches OVP when V-SET exceeds the active limit.
+    pub fn write_group(&mut self, n: u8, p: &GroupParams) -> Result<GroupParams, XyError> {
         validate_group(n)?;
-        let regs = encode_group(p, self.model)?;
+        let mut regs = encode_group(p, self.model, p.s_otp.unit)?;
+        let unit = self.read_temp_unit()?;
+        regs[12] = encode_group_otp(p.s_otp, unit)?;
+        if n == 0 {
+            let current_ovp = self.read_one(REG_S_OVP)?;
+            if regs[0] > current_ovp {
+                self.write_one(REG_S_OVP, regs[3])?;
+            }
+        }
         self.transport
             .write_multiple_holdings(self.slave, group_addr(n), &regs)?;
-        Ok(())
+        self.read_group_in_unit(n, unit)
     }
 
     fn read_one(&mut self, addr: u16) -> Result<u16, XyError> {
@@ -525,6 +555,7 @@ fn decode_group(
     r: &[u16; GROUP_LEN as usize],
     model: Model,
     addr: u16,
+    unit: TempUnit,
 ) -> Result<GroupParams, XyError> {
     let i_scale = model.current_scale();
     let [
@@ -554,17 +585,23 @@ fn decode_group(
             ocp_a: from_reg_u16(s_ocp, i_scale),
         },
         s_opp_w: from_reg_u16(s_opp, model.opp_scale()),
-        s_ohp_h,
-        s_ohp_m,
+        s_ohp_h: decode_u16_max(addr + 6, s_ohp_h, 99)?,
+        s_ohp_m: decode_u16_max(addr + 7, s_ohp_m, 59)?,
         s_oah_ah: from_reg_u32(s_oah_low, s_oah_high, 1000.0),
         s_owh_wh: from_reg_u32(s_owh_low, s_owh_high, 100.0),
-        // XY7025 stores S-OTP in displayed degrees rather than tenths.
-        s_otp: from_reg_u16(s_otp, 1.0),
+        s_otp: Temperature {
+            value: from_reg_u16(s_otp, 1.0),
+            unit,
+        },
         power_on_output: decode_bool(addr + 13, s_ini)?,
     })
 }
 
-fn encode_group(p: &GroupParams, model: Model) -> Result<[u16; GROUP_LEN as usize], InputError> {
+fn encode_group(
+    p: &GroupParams,
+    model: Model,
+    unit: TempUnit,
+) -> Result<[u16; GROUP_LEN as usize], InputError> {
     let i_scale = model.current_scale();
     let limits = model.limits();
     validate_u16_max(p.s_ohp_h, 99, InputField::OutputTimeHours)?;
@@ -581,7 +618,7 @@ fn encode_group(p: &GroupParams, model: Model) -> Result<[u16; GROUP_LEN as usiz
         limits.energy_limit_wh,
         InputField::EnergyLimit,
     )?;
-    Ok([
+    let values = [
         to_reg_u16(
             p.setpoints.v_set,
             100.0,
@@ -624,17 +661,27 @@ fn encode_group(p: &GroupParams, model: Model) -> Result<[u16; GROUP_LEN as usiz
         oah.high,
         owh.low,
         owh.high,
-        to_reg_u16(
-            p.s_otp,
-            1.0,
-            ModelRange {
-                min: 0.0,
-                max: 230.0,
-            },
-            InputField::OverTemperatureProtection,
-        )?,
+        encode_group_otp(p.s_otp, unit)?,
         p.power_on_output as u16,
-    ])
+    ];
+    if values[0] > values[3] {
+        return Err(InputError::VoltageSetpointAboveProtection);
+    }
+    Ok(values)
+}
+
+fn encode_group_otp(temperature: Temperature, unit: TempUnit) -> Result<u16, InputError> {
+    let temperature = temperature.convert_to(unit);
+    let max = match unit {
+        TempUnit::Celsius => 110.0,
+        TempUnit::Fahrenheit => 230.0,
+    };
+    to_reg_u16(
+        temperature.value,
+        1.0,
+        ModelRange { min: 0.0, max },
+        InputField::OverTemperatureProtection,
+    )
 }
 
 #[cfg(test)]

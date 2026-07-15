@@ -369,25 +369,31 @@ fn read_totals_composes_high_low() {
 
 #[test]
 fn read_group_decodes_14_regs() {
-    let mock = MockTransport::new(vec![Op::Read {
-        addr: group_addr(1),
-        values: vec![
-            1440, // v_set
-            1000, // i_set
-            1000, // s_lvp
-            1500, // s_ovp
-            1250, // s_ocp
-            1800, // s_opp (W, scale 1)
-            0,    // ohp_h
-            0,    // ohp_m
-            0,    // oah_l
-            0,    // oah_h
-            0,    // owh_l
-            0,    // owh_h
-            95,   // s_otp (scale 1 → 95.0; raw matches displayed °)
-            0,    // s_ini
-        ],
-    }]);
+    let mock = MockTransport::new(vec![
+        Op::Read {
+            addr: REG_TEMP_UNIT,
+            values: vec![1],
+        },
+        Op::Read {
+            addr: group_addr(1),
+            values: vec![
+                1440, // v_set
+                1000, // i_set
+                1000, // s_lvp
+                1500, // s_ovp
+                1250, // s_ocp
+                1800, // s_opp (W, scale 1)
+                0,    // ohp_h
+                0,    // ohp_m
+                0,    // oah_l
+                0,    // oah_h
+                0,    // owh_l
+                0,    // owh_h
+                95,   // s_otp (scale 1 → 95.0; raw matches displayed °)
+                0,    // s_ini
+            ],
+        },
+    ]);
     let mut xy = Xy::new(mock, Model::Xy7025);
     let g = xy.read_group(1).unwrap();
     assert_eq!(g.setpoints.v_set, 14.40);
@@ -395,7 +401,13 @@ fn read_group_decodes_14_regs() {
     assert_eq!(g.s_opp_w, 1800.0);
     assert_eq!(g.s_oah_ah, 0.0);
     assert_eq!(g.s_owh_wh, 0.0);
-    assert_eq!(g.s_otp, 95.0);
+    assert_eq!(
+        g.s_otp,
+        Temperature {
+            value: 95.0,
+            unit: TempUnit::Fahrenheit,
+        }
+    );
     assert!(!g.power_on_output);
 }
 
@@ -416,15 +428,31 @@ fn write_group_round_trips_through_encode() {
         s_ohp_m: 0,
         s_oah_ah: 0.0,
         s_owh_wh: 0.0,
-        s_otp: 95.0,
+        s_otp: Temperature {
+            value: 95.0,
+            unit: TempUnit::Celsius,
+        },
         power_on_output: true,
     };
-    let mock = MockTransport::new(vec![Op::WriteMany {
-        addr: group_addr(2),
-        values: vec![1440, 1000, 1000, 1500, 1250, 1800, 0, 0, 0, 0, 0, 0, 95, 1],
-    }]);
+    let stored = vec![1440, 1000, 1000, 1500, 1250, 1800, 0, 0, 0, 0, 0, 0, 94, 1];
+    let mock = MockTransport::new(vec![
+        Op::Read {
+            addr: REG_TEMP_UNIT,
+            values: vec![0],
+        },
+        Op::WriteMany {
+            addr: group_addr(2),
+            values: vec![1440, 1000, 1000, 1500, 1250, 1800, 0, 0, 0, 0, 0, 0, 95, 1],
+        },
+        Op::Read {
+            addr: group_addr(2),
+            values: stored,
+        },
+    ]);
     let mut xy = Xy::new(mock, Model::Xy7025);
-    xy.write_group(2, &p).unwrap();
+    let written = xy.write_group(2, &p).unwrap();
+    assert_eq!(written.s_otp.value, 94.0);
+    assert_ne!(written.s_otp, p.s_otp);
 
     let mut invalid = p;
     invalid.safety_limits.lvp_v = 9.99;
@@ -434,6 +462,72 @@ fn write_group_round_trips_through_encode() {
             field: InputField::LowVoltageProtection
         }))
     );
+
+    let mut invalid = p;
+    invalid.s_otp.value = 110.1;
+    assert_eq!(
+        xy.write_group(2, &invalid),
+        Err(XyError::Input(InputError::OutOfRange {
+            field: InputField::OverTemperatureProtection
+        }))
+    );
+
+    let mut invalid = p;
+    invalid.setpoints.v_set = 15.01;
+    assert_eq!(
+        xy.write_group(2, &invalid),
+        Err(XyError::Input(InputError::VoltageSetpointAboveProtection))
+    );
+}
+
+#[test]
+fn live_group_raises_ovp_before_voltage_setpoint() {
+    let p = GroupParams {
+        setpoints: Setpoints {
+            v_set: 14.40,
+            i_set: 10.00,
+        },
+        safety_limits: SafetyLimits {
+            lvp_v: 10.00,
+            ovp_v: 15.00,
+            ocp_a: 12.50,
+        },
+        s_opp_w: 1800.0,
+        s_ohp_h: 0,
+        s_ohp_m: 0,
+        s_oah_ah: 0.0,
+        s_owh_wh: 0.0,
+        s_otp: Temperature {
+            value: 95.0,
+            unit: TempUnit::Celsius,
+        },
+        power_on_output: false,
+    };
+    let values = vec![1440, 1000, 1000, 1500, 1250, 1800, 0, 0, 0, 0, 0, 0, 95, 0];
+    let mock = MockTransport::new(vec![
+        Op::Read {
+            addr: REG_TEMP_UNIT,
+            values: vec![0],
+        },
+        Op::Read {
+            addr: REG_S_OVP,
+            values: vec![1300],
+        },
+        Op::WriteOne {
+            addr: REG_S_OVP,
+            value: 1500,
+        },
+        Op::WriteMany {
+            addr: group_addr(0),
+            values: values.clone(),
+        },
+        Op::Read {
+            addr: group_addr(0),
+            values,
+        },
+    ]);
+    let mut xy = Xy::new(mock, Model::Xy7025);
+    assert_eq!(xy.write_group(0, &p).unwrap(), p);
 }
 
 #[test]
@@ -476,13 +570,16 @@ fn group_encode_decode_round_trip() {
         s_ohp_m: 30,
         s_oah_ah: 131.572,
         s_owh_wh: 123.45,
-        s_otp: 95.0,
+        s_otp: Temperature {
+            value: 95.0,
+            unit: TempUnit::Celsius,
+        },
         power_on_output: true,
     };
-    let regs = encode_group(&p, Model::Xy7025).unwrap();
+    let regs = encode_group(&p, Model::Xy7025, TempUnit::Celsius).unwrap();
     // Pin the encoded oah/owh register pair layout (low, high).
     assert_eq!(regs[8..12], [500, 2, 12_345, 0]);
-    let decoded = decode_group(&regs, Model::Xy7025, group_addr(0)).unwrap();
+    let decoded = decode_group(&regs, Model::Xy7025, group_addr(0), TempUnit::Celsius).unwrap();
     assert_eq!(decoded.setpoints, p.setpoints);
     assert_eq!(decoded.safety_limits, p.safety_limits);
     assert_eq!(decoded.s_opp_w, p.s_opp_w);
@@ -492,6 +589,27 @@ fn group_encode_decode_round_trip() {
     assert_eq!(decoded.s_owh_wh, p.s_owh_wh);
     assert_eq!(decoded.s_otp, p.s_otp);
     assert_eq!(decoded.power_on_output, p.power_on_output);
+
+    let fahrenheit_regs = encode_group(&p, Model::Xy7025, TempUnit::Fahrenheit).unwrap();
+    assert_eq!(fahrenheit_regs[12], 203);
+    assert_ne!(fahrenheit_regs[12], regs[12]);
+
+    let mut fahrenheit_limit = p;
+    fahrenheit_limit.s_otp = Temperature {
+        value: 230.0,
+        unit: TempUnit::Fahrenheit,
+    };
+    assert_eq!(
+        encode_group(&fahrenheit_limit, Model::Xy7025, TempUnit::Celsius).unwrap()[12],
+        110
+    );
+    fahrenheit_limit.s_otp.value = 230.1;
+    assert_eq!(
+        encode_group(&fahrenheit_limit, Model::Xy7025, TempUnit::Fahrenheit),
+        Err(InputError::OutOfRange {
+            field: InputField::OverTemperatureProtection
+        })
+    );
 }
 
 /// Pins (register address, raw value) for each one-shot setter. A wrong
@@ -612,18 +730,30 @@ fn one_shot_getters_use_correct_addr_and_scale() {
     let mut xy = Xy::new(
         MockTransport::new(vec![Op::Read {
             addr: REG_T_IN,
-            values: vec![345, 256],
+            values: vec![345, 256, 0, 0, 0, 0, 1],
         }]),
         Model::Xy7025,
     );
     let t = xy.read_temperatures().unwrap();
-    assert_eq!(t.internal, 34.5);
-    assert_eq!(t.external, Some(25.6));
+    assert_eq!(
+        t.internal,
+        Temperature {
+            value: 34.5,
+            unit: TempUnit::Fahrenheit,
+        }
+    );
+    assert_eq!(
+        t.external,
+        Some(Temperature {
+            value: 25.6,
+            unit: TempUnit::Fahrenheit,
+        })
+    );
 
     let mut xy = Xy::new(
         MockTransport::new(vec![Op::Read {
             addr: REG_T_IN,
-            values: vec![345, 8888],
+            values: vec![345, 8888, 0, 0, 0, 0, 0],
         }]),
         Model::Xy7025,
     );
@@ -632,8 +762,12 @@ fn one_shot_getters_use_correct_addr_and_scale() {
 
 #[test]
 fn invalid_register_values_are_not_normalized() {
-    let mut group = vec![0; GROUP_LEN as usize];
-    group[13] = 2;
+    let mut invalid_group_bool = vec![0; GROUP_LEN as usize];
+    invalid_group_bool[13] = 2;
+    let mut invalid_group_hours = vec![0; GROUP_LEN as usize];
+    invalid_group_hours[6] = 100;
+    let mut invalid_group_minutes = vec![0; GROUP_LEN as usize];
+    invalid_group_minutes[7] = 60;
     let mut invalid_output_status = status_fixture([0; 6]);
     invalid_output_status[REG_OUTPUT_EN as usize] = 2;
     let mut invalid_protection_status = status_fixture([0; 6]);
@@ -671,8 +805,40 @@ fn invalid_register_values_are_not_normalized() {
                 values: vec![9],
             },
             Op::Read {
+                addr: REG_TEMP_UNIT,
+                values: vec![0],
+            },
+            Op::Read {
                 addr: group_addr(1),
-                values: group,
+                values: invalid_group_bool,
+            },
+            Op::Read {
+                addr: REG_TEMP_UNIT,
+                values: vec![0],
+            },
+            Op::Read {
+                addr: group_addr(2),
+                values: invalid_group_hours,
+            },
+            Op::Read {
+                addr: REG_TEMP_UNIT,
+                values: vec![0],
+            },
+            Op::Read {
+                addr: group_addr(3),
+                values: invalid_group_minutes,
+            },
+            Op::Read {
+                addr: REG_AH_LOW,
+                values: vec![0, 0, 0, 0, 1, 60, 0],
+            },
+            Op::Read {
+                addr: REG_AH_LOW,
+                values: vec![0, 0, 0, 0, 1, 0, 60],
+            },
+            Op::Read {
+                addr: REG_T_IN,
+                values: vec![0, 8888, 0, 0, 0, 0, 2],
             },
             Op::Read {
                 addr: REG_V_SET,
@@ -699,6 +865,11 @@ fn invalid_register_values_are_not_normalized() {
         (xy.read_temp_unit().map(|_| ()), REG_TEMP_UNIT, 2),
         (xy.read_baud_rate().map(|_| ()), REG_BAUD_CODE, 9),
         (xy.read_group(1).map(|_| ()), group_addr(1) + 13, 2),
+        (xy.read_group(2).map(|_| ()), group_addr(2) + 6, 100),
+        (xy.read_group(3).map(|_| ()), group_addr(3) + 7, 60),
+        (xy.read_totals().map(|_| ()), REG_OUT_M, 60),
+        (xy.read_totals().map(|_| ()), REG_OUT_S, 60),
+        (xy.read_temperatures().map(|_| ()), REG_TEMP_UNIT, 2),
         (xy.read_status().map(|_| ()), REG_OUTPUT_EN, 2),
         (xy.read_status().map(|_| ()), REG_PROTECT, 11),
         (xy.read_status().map(|_| ()), REG_CVCC, 2),
@@ -797,7 +968,7 @@ fn group_encode_uses_custom_scales_and_limits() {
         },
         safety_limits: SafetyLimits {
             lvp_v: 5.0,
-            ovp_v: 0.0,
+            ovp_v: 10.0,
             ocp_a: 0.0,
         },
         s_opp_w: 18.0,
@@ -805,16 +976,29 @@ fn group_encode_uses_custom_scales_and_limits() {
         s_ohp_m: 0,
         s_oah_ah: 0.0,
         s_owh_wh: 0.0,
-        s_otp: 0.0,
+        s_otp: Temperature {
+            value: 0.0,
+            unit: TempUnit::Celsius,
+        },
         power_on_output: false,
     };
-    let mock = MockTransport::new(vec![Op::WriteMany {
-        addr: group_addr(0),
-        // v_set=500, i_set=1000, lvp=500, s_opp=180, s_otp=0.
-        values: vec![500, 1000, 500, 0, 0, 180, 0, 0, 0, 0, 0, 0, 0, 0],
-    }]);
+    let values = vec![500, 1000, 500, 1000, 0, 180, 0, 0, 0, 0, 0, 0, 0, 0];
+    let mock = MockTransport::new(vec![
+        Op::Read {
+            addr: REG_TEMP_UNIT,
+            values: vec![0],
+        },
+        Op::WriteMany {
+            addr: group_addr(1),
+            values: values.clone(),
+        },
+        Op::Read {
+            addr: group_addr(1),
+            values,
+        },
+    ]);
     let mut xy = Xy::new(mock, custom_model(1000, 100, 10));
-    xy.write_group(0, &p).unwrap();
+    xy.write_group(1, &p).unwrap();
 }
 
 #[test]

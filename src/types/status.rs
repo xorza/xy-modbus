@@ -1,6 +1,6 @@
 //! Live readings, setpoints, and cumulative counters.
 
-use crate::types::enums::{ProtectionStatus, RegMode};
+use crate::types::enums::{ProtectionStatus, RegMode, TempUnit};
 
 /// Output voltage / current setpoints (registers 0x0000–0x0001).
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -63,8 +63,26 @@ pub struct Totals {
     pub on_time: OnTime,
 }
 
-/// Temperature readings from registers `0x000D` (T-IN) and `0x000E` (T-EX),
-/// in the unit selected by [`crate::TempUnit`].
+/// A temperature value paired with its unit.
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct Temperature {
+    pub value: f32,
+    pub unit: TempUnit,
+}
+
+impl Temperature {
+    pub fn convert_to(self, unit: TempUnit) -> Self {
+        let value = match (self.unit, unit) {
+            (TempUnit::Celsius, TempUnit::Fahrenheit) => self.value * 9.0 / 5.0 + 32.0,
+            (TempUnit::Fahrenheit, TempUnit::Celsius) => (self.value - 32.0) * 5.0 / 9.0,
+            _ => self.value,
+        };
+        Self { value, unit }
+    }
+}
+
+/// Temperature readings from registers `0x000D` (T-IN) and `0x000E` (T-EX).
 ///
 /// `internal` is the on-board sensor — verified on XY7025 hardware.
 ///
@@ -76,8 +94,8 @@ pub struct Totals {
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Temperatures {
-    pub internal: f32,
-    pub external: Option<f32>,
+    pub internal: Temperature,
+    pub external: Option<Temperature>,
 }
 
 /// Hard trip limits programmed into the buck's protection registers.
@@ -124,6 +142,34 @@ mod tests {
             }
             .total_seconds(),
             65535u32 * 3600
+        );
+    }
+
+    #[test]
+    fn temperature_conversion_preserves_value_and_unit() {
+        let freezing = Temperature {
+            value: 0.0,
+            unit: TempUnit::Celsius,
+        };
+        assert_eq!(
+            freezing.convert_to(TempUnit::Fahrenheit),
+            Temperature {
+                value: 32.0,
+                unit: TempUnit::Fahrenheit,
+            }
+        );
+        assert_eq!(freezing.convert_to(TempUnit::Celsius), freezing);
+
+        let boiling = Temperature {
+            value: 212.0,
+            unit: TempUnit::Fahrenheit,
+        };
+        assert_eq!(
+            boiling.convert_to(TempUnit::Celsius),
+            Temperature {
+                value: 100.0,
+                unit: TempUnit::Celsius,
+            }
         );
     }
 }

@@ -11,6 +11,8 @@ repository has no branch named `main`.
 - Added compact, typed `InputField`, `InputError`, and `XyError` values to
   distinguish invalid API input, invalid device register data, and Modbus
   transport failures without storing string pointers in embedded errors.
+- Added `Temperature`, which pairs each temperature value with its `TempUnit`
+  and supports explicit unit conversion.
 - Added model-aware validation for voltage, current, protection, group, slave,
   display, sleep, baud-rate, and temperature-unit writes before any I/O occurs.
 - Added `Xy::read_raw_holding` and `Xy::write_raw_holding` for raw register access
@@ -35,7 +37,10 @@ repository has no branch named `main`.
 - **Breaking:** `GroupParams` now embeds `Setpoints` and `SafetyLimits`, and its
   32-bit charge and energy fields use `f64`.
 - **Breaking:** `Totals` charge and energy fields use `f64`, and
-  `Temperatures::external` is now `Option<f32>`.
+  `Temperatures` now returns unit-tagged `Temperature` values.
+- **Breaking:** `GroupParams::s_otp` is now a unit-tagged `Temperature`;
+  `write_group` converts it to the active unit and returns the values read back
+  after firmware clamping or rounding.
 - **Breaking:** Custom models now require explicit scales and physical limits;
   `verify_scale_family` returns `ScaleCheck::Compatible` or `Inconclusive`
   without claiming exact model identity. Wire-encoded enums no longer expose
@@ -64,6 +69,10 @@ repository has no branch named `main`.
   values instead of silently clamping or normalizing them.
 - Enforced the documented XY7025 LVP minimum of 10 V for standalone and group
   protection writes.
+- Rejected invalid group hours/minutes and runtime minutes/seconds read from the
+  device instead of returning malformed time values.
+- Guarded live M0 writes against the V-SET/S-OVP ordering hazard without
+  assuming that FC10 register application is atomic.
 - Preserved all `u32` register-pair values across decode/encode round trips by
   using `f64` for cumulative counters and group limits.
 - Recognized both documented XY7025-family model codes, `0x6100` and `0x6500`,
