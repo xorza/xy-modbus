@@ -18,6 +18,13 @@ exclude = [
     "examples/*",
 ]
 
+[lints.rust]
+missing_debug_implementations = "deny"
+unreachable_pub = "deny"
+
+[lints.clippy]
+items_after_test_module = "deny"
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
