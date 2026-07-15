@@ -3,20 +3,20 @@
 
 pub(crate) mod error;
 
-use crate::device::error::{InputError, XyError};
+use crate::device::error::{InputError, InputField, XyError};
 use crate::regs::*;
 use crate::transport::{ModbusTransport, RtuError};
 use crate::types::enums::{BaudRate, ProtectionStatus, RegMode, TempUnit};
 use crate::types::group::GroupParams;
-use crate::types::model::{Model, ModelCheck};
+use crate::types::model::{Model, ModelRange, ScaleCheck};
 use crate::types::status::{OnTime, SafetyLimits, Setpoints, Status, Temperatures, Totals};
 
-fn to_reg_u16(v: f32, scale: f32, max: f32, field: &'static str) -> Result<u16, InputError> {
+fn to_reg_u16(v: f32, scale: f32, range: ModelRange, field: InputField) -> Result<u16, InputError> {
     if !v.is_finite() {
         return Err(InputError::NonFinite { field });
     }
     let scaled = v * scale;
-    if v < 0.0 || v > max || scaled > u16::MAX as f32 + 0.5 {
+    if !range.contains(v as f64) || scaled > u16::MAX as f32 + 0.5 {
         return Err(InputError::OutOfRange { field });
     }
     Ok((scaled + 0.5) as u16)
@@ -44,14 +44,14 @@ struct RegisterWords {
 fn to_reg_u32(
     v: f64,
     scale: f64,
-    max: f64,
-    field: &'static str,
+    range: ModelRange,
+    field: InputField,
 ) -> Result<RegisterWords, InputError> {
     if !v.is_finite() {
         return Err(InputError::NonFinite { field });
     }
     let scaled = v * scale;
-    if v < 0.0 || v > max || scaled > u32::MAX as f64 + 0.5 {
+    if !range.contains(v) || scaled > u32::MAX as f64 + 0.5 {
         return Err(InputError::OutOfRange { field });
     }
     let raw = (scaled + 0.5) as u32;
@@ -77,7 +77,7 @@ fn validate_group(group: u8) -> Result<(), InputError> {
     }
 }
 
-fn validate_u16_max(value: u16, max: u16, field: &'static str) -> Result<(), InputError> {
+fn validate_u16_max(value: u16, max: u16, field: InputField) -> Result<(), InputError> {
     if value <= max {
         Ok(())
     } else {
@@ -101,13 +101,12 @@ fn decode_register<T>(
     decode(value).map_err(|value| XyError::InvalidRegisterValue { register, value })
 }
 
-/// Driver for the XY-series buck converter.
+/// High-level driver for XY7025 and compatible 14-register profiles.
 ///
 /// Construct with [`Xy::new`] (default slave `0x01`) or
-/// [`Xy::with_slave`]. The [`Model`] selects per-variant scales for
-/// I-SET / IOUT / S-OCP / POWER / S-OPP — passing the wrong model
-/// silently yields readings off by 10×, so cross-check
-/// [`Self::read_model`] against your hardware.
+/// [`Xy::with_slave`]. The [`Model`] supplies fixed-point scales and physical
+/// write limits. Passing the wrong scale family silently yields readings off by
+/// 10×, so call [`Self::verify_scale_family`] during bring-up.
 #[derive(Debug)]
 pub struct Xy<T: ModbusTransport> {
     transport: T,
@@ -118,6 +117,7 @@ pub struct Xy<T: ModbusTransport> {
 impl<T: ModbusTransport> Xy<T> {
     /// Wrap a transport using the default slave address (`0x01`).
     pub fn new(transport: T, model: Model) -> Self {
+        model.assert_valid();
         Self {
             transport,
             slave: DEFAULT_SLAVE,
@@ -126,6 +126,7 @@ impl<T: ModbusTransport> Xy<T> {
     }
 
     pub fn with_slave(transport: T, model: Model, slave: u8) -> Result<Self, InputError> {
+        model.assert_valid();
         validate_slave(slave)?;
         Ok(Self {
             transport,
@@ -228,7 +229,12 @@ impl<T: ModbusTransport> Xy<T> {
     /// V-SET higher than the current S-OVP latches OVP immediately —
     /// program protection (see [`Self::set_protection`]) first.
     pub fn set_voltage(&mut self, volts: f32) -> Result<(), XyError> {
-        let raw = to_reg_u16(volts, 100.0, self.model.max_voltage_set(), "voltage")?;
+        let raw = to_reg_u16(
+            volts,
+            100.0,
+            self.model.limits().voltage_set_v,
+            InputField::VoltageSetpoint,
+        )?;
         self.write_one(REG_V_SET, raw)
     }
 
@@ -236,8 +242,8 @@ impl<T: ModbusTransport> Xy<T> {
         let raw = to_reg_u16(
             amps,
             self.model.current_scale(),
-            self.model.max_current_set(),
-            "current limit",
+            self.model.limits().current_set_a,
+            InputField::CurrentSetpoint,
         )?;
         self.write_one(REG_I_SET, raw)
     }
@@ -245,14 +251,25 @@ impl<T: ModbusTransport> Xy<T> {
     /// Program LVP / OVP / OCP into the active group's protection
     /// registers (0x0052–0x0054) in one bulk write.
     pub fn set_protection(&mut self, l: SafetyLimits) -> Result<(), XyError> {
+        let limits = self.model.limits();
         let values = [
-            to_reg_u16(l.lvp_v, 100.0, self.model.max_lvp(), "LVP")?,
-            to_reg_u16(l.ovp_v, 100.0, self.model.max_ovp(), "OVP")?,
+            to_reg_u16(
+                l.lvp_v,
+                100.0,
+                limits.lvp_v,
+                InputField::LowVoltageProtection,
+            )?,
+            to_reg_u16(
+                l.ovp_v,
+                100.0,
+                limits.ovp_v,
+                InputField::OverVoltageProtection,
+            )?,
             to_reg_u16(
                 l.ocp_a,
                 self.model.current_scale(),
-                self.model.max_ocp(),
-                "OCP",
+                limits.ocp_a,
+                InputField::OverCurrentProtection,
             )?,
         ];
         self.transport
@@ -371,7 +388,10 @@ impl<T: ModbusTransport> Xy<T> {
     /// display can't be fully extinguished via Modbus.
     pub fn set_backlight(&mut self, level: u8) -> Result<(), XyError> {
         if !(1..=5).contains(&level) {
-            return Err(InputError::OutOfRange { field: "backlight" }.into());
+            return Err(InputError::OutOfRange {
+                field: InputField::Backlight,
+            }
+            .into());
         }
         self.write_one(REG_BACKLIGHT, level as u16)
     }
@@ -379,9 +399,11 @@ impl<T: ModbusTransport> Xy<T> {
     /// Off-screen timeout in minutes.
     pub fn read_sleep_minutes(&mut self) -> Result<u16, XyError> {
         let value = self.read_one(REG_SLEEP)?;
-        validate_u16_max(value, 9, "sleep timeout").map_err(|_| XyError::InvalidRegisterValue {
-            register: REG_SLEEP,
-            value,
+        validate_u16_max(value, 9, InputField::SleepTimeout).map_err(|_| {
+            XyError::InvalidRegisterValue {
+                register: REG_SLEEP,
+                value,
+            }
         })?;
         Ok(value)
     }
@@ -389,7 +411,7 @@ impl<T: ModbusTransport> Xy<T> {
     /// stored value at 9; any write ≥10 reads back as 9. Pass 0 to
     /// disable auto-off.
     pub fn set_sleep_minutes(&mut self, minutes: u16) -> Result<(), XyError> {
-        validate_u16_max(minutes, 9, "sleep timeout")?;
+        validate_u16_max(minutes, 9, InputField::SleepTimeout)?;
         self.write_one(REG_SLEEP, minutes)
     }
 
@@ -407,20 +429,19 @@ impl<T: ModbusTransport> Xy<T> {
         self.read_one(REG_MODEL)
     }
 
-    /// Read the device's `MODEL` register and check it against the
-    /// configured [`Model`]'s expected family code. Catches the
-    /// "wrong scale family" footgun where `read_status().i_out` would
-    /// silently come back 10× off — a one-call sanity check at boot.
+    /// Read the device's `MODEL` register and check whether it belongs to the
+    /// configured [`Model`]'s scale family. This catches the footgun where
+    /// `read_status().i_out` silently comes back 10× off, but it does not prove
+    /// exact hardware identity or physical limits.
     ///
-    /// Returns [`ModelCheck::Inconclusive`] for unknown device codes or
-    /// models without a canonical code, and [`ModelCheck::Match`] only
-    /// for a documented code belonging to the configured scale family.
-    pub fn verify_model(&mut self) -> Result<ModelCheck, XyError> {
+    /// Returns [`ScaleCheck::Inconclusive`] for unknown device codes or custom
+    /// profiles without a canonical code.
+    pub fn verify_scale_family(&mut self) -> Result<ScaleCheck, XyError> {
         let device_code = self.read_model()?;
-        if self.model.recognizes_model_code(device_code) {
-            Ok(ModelCheck::Match { device_code })
+        if self.model.recognizes_scale_code(device_code) {
+            Ok(ScaleCheck::Compatible { device_code })
         } else {
-            Ok(ModelCheck::Inconclusive { device_code })
+            Ok(ScaleCheck::Inconclusive { device_code })
         }
     }
 
@@ -545,44 +566,73 @@ fn decode_group(
 
 fn encode_group(p: &GroupParams, model: Model) -> Result<[u16; GROUP_LEN as usize], InputError> {
     let i_scale = model.current_scale();
-    validate_u16_max(p.s_ohp_h, 99, "output-time hours")?;
-    validate_u16_max(p.s_ohp_m, 59, "output-time minutes")?;
-    let max_oah = if matches!(model, Model::Xy7025) {
-        9999.0
-    } else {
-        u32::MAX as f64 / 1000.0
-    };
-    let max_owh = if matches!(model, Model::Xy7025) {
-        4_200_000.0
-    } else {
-        u32::MAX as f64 / 100.0
-    };
-    let oah = to_reg_u32(p.s_oah_ah, 1000.0, max_oah, "charge limit")?;
-    let owh = to_reg_u32(p.s_owh_wh, 100.0, max_owh, "energy limit")?;
+    let limits = model.limits();
+    validate_u16_max(p.s_ohp_h, 99, InputField::OutputTimeHours)?;
+    validate_u16_max(p.s_ohp_m, 59, InputField::OutputTimeMinutes)?;
+    let oah = to_reg_u32(
+        p.s_oah_ah,
+        1000.0,
+        limits.charge_limit_ah,
+        InputField::ChargeLimit,
+    )?;
+    let owh = to_reg_u32(
+        p.s_owh_wh,
+        100.0,
+        limits.energy_limit_wh,
+        InputField::EnergyLimit,
+    )?;
     Ok([
         to_reg_u16(
             p.setpoints.v_set,
             100.0,
-            model.max_voltage_set(),
-            "group voltage",
+            limits.voltage_set_v,
+            InputField::VoltageSetpoint,
         )?,
         to_reg_u16(
             p.setpoints.i_set,
             i_scale,
-            model.max_current_set(),
-            "group current",
+            limits.current_set_a,
+            InputField::CurrentSetpoint,
         )?,
-        to_reg_u16(p.safety_limits.lvp_v, 100.0, model.max_lvp(), "group LVP")?,
-        to_reg_u16(p.safety_limits.ovp_v, 100.0, model.max_ovp(), "group OVP")?,
-        to_reg_u16(p.safety_limits.ocp_a, i_scale, model.max_ocp(), "group OCP")?,
-        to_reg_u16(p.s_opp_w, model.opp_scale(), model.max_opp(), "group OPP")?,
+        to_reg_u16(
+            p.safety_limits.lvp_v,
+            100.0,
+            limits.lvp_v,
+            InputField::LowVoltageProtection,
+        )?,
+        to_reg_u16(
+            p.safety_limits.ovp_v,
+            100.0,
+            limits.ovp_v,
+            InputField::OverVoltageProtection,
+        )?,
+        to_reg_u16(
+            p.safety_limits.ocp_a,
+            i_scale,
+            limits.ocp_a,
+            InputField::OverCurrentProtection,
+        )?,
+        to_reg_u16(
+            p.s_opp_w,
+            model.opp_scale(),
+            limits.opp_w,
+            InputField::OverPowerProtection,
+        )?,
         p.s_ohp_h,
         p.s_ohp_m,
         oah.low,
         oah.high,
         owh.low,
         owh.high,
-        to_reg_u16(p.s_otp, 1.0, 230.0, "group OTP")?,
+        to_reg_u16(
+            p.s_otp,
+            1.0,
+            ModelRange {
+                min: 0.0,
+                max: 230.0,
+            },
+            InputField::OverTemperatureProtection,
+        )?,
         p.power_on_output as u16,
     ])
 }

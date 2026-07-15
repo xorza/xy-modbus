@@ -1,6 +1,7 @@
 extern crate std;
 
 use core::error::Error;
+use core::mem::size_of;
 use std::format;
 
 use super::*;
@@ -9,12 +10,16 @@ use super::*;
 fn input_error_display_identifies_each_invalid_input() {
     let cases = [
         (
-            InputError::NonFinite { field: "voltage" },
-            "voltage must be finite",
+            InputError::NonFinite {
+                field: InputField::VoltageSetpoint,
+            },
+            "voltage setpoint must be finite",
         ),
         (
-            InputError::OutOfRange { field: "current" },
-            "current is out of range",
+            InputError::OutOfRange {
+                field: InputField::CurrentSetpoint,
+            },
+            "current setpoint is out of range",
         ),
         (
             InputError::InvalidSlaveAddress { address: 248 },
@@ -32,8 +37,10 @@ fn input_error_display_identifies_each_invalid_input() {
 
 #[test]
 fn xy_error_preserves_sources_and_invalid_register_context() {
-    let input = XyError::from(InputError::OutOfRange { field: "voltage" });
-    assert_eq!(format!("{input}"), "voltage is out of range");
+    let input = XyError::from(InputError::OutOfRange {
+        field: InputField::VoltageSetpoint,
+    });
+    assert_eq!(format!("{input}"), "voltage setpoint is out of range");
     assert!(input.source().is_some());
 
     let rtu = XyError::from(RtuError::Timeout);
@@ -49,4 +56,10 @@ fn xy_error_preserves_sources_and_invalid_register_context() {
         "invalid value 300 in register 0x0018"
     );
     assert!(register.source().is_none());
+}
+
+#[test]
+fn input_errors_have_compact_embedded_representations() {
+    assert_eq!(size_of::<InputField>(), 1);
+    assert_eq!(size_of::<InputError>(), 2);
 }

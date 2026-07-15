@@ -5,7 +5,6 @@ use crate::types::enums::{ProtectionStatus, RegMode};
 /// Output voltage / current setpoints (registers 0x0000–0x0001).
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Setpoints {
     pub v_set: f32,
     pub i_set: f32,
@@ -17,7 +16,6 @@ pub struct Setpoints {
 /// output-enable flag) in one Modbus round-trip.
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Status {
     pub v_set: f32,
     pub i_set: f32,
@@ -37,7 +35,6 @@ pub struct Status {
 /// Output-on time as reported by the device (h/m/s).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OnTime {
     pub hours: u16,
     pub minutes: u16,
@@ -57,7 +54,6 @@ impl OnTime {
 /// against your hardware before trusting them at high totals.
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Totals {
     /// Cumulative output charge in Ah.
     pub charge_ah: f64,
@@ -79,7 +75,6 @@ pub struct Totals {
 /// against a known reference temperature on the target unit.
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Temperatures {
     pub internal: f32,
     pub external: Option<f32>,
@@ -88,7 +83,6 @@ pub struct Temperatures {
 /// Hard trip limits programmed into the buck's protection registers.
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SafetyLimits {
     pub lvp_v: f32,
     pub ovp_v: f32,

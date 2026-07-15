@@ -24,7 +24,7 @@ use esp_idf_hal::uart::config::Config;
 use esp_idf_hal::units::Hertz;
 
 use xy_modbus::{
-    BaudRate, GroupParams, Model, ModelCheck, ProtectionStatus, SafetyLimits, Setpoints, TempUnit,
+    BaudRate, GroupParams, Model, ScaleCheck, ProtectionStatus, SafetyLimits, Setpoints, TempUnit,
     Xy,
 };
 
@@ -333,11 +333,11 @@ fn expect_approx64(name: &str, expected: f64, actual: f64) -> Result<(), String>
 fn test_identity(xy: &mut T) -> Result<(), String> {
     let model_raw = xy.read_model().map_err(driver_error)?;
     let version = xy.read_version().map_err(driver_error)?;
-    let check = xy.verify_model().map_err(driver_error)?;
+    let check = xy.verify_scale_family().map_err(driver_error)?;
     info!("  MODEL=0x{model_raw:04X} VERSION=0x{version:04X} check={check:?}");
     match check {
-        ModelCheck::Match { .. } => Ok(()),
-        ModelCheck::Inconclusive { device_code } => Err(format!(
+        ScaleCheck::Compatible { .. } => Ok(()),
+        ScaleCheck::Inconclusive { device_code } => Err(format!(
             "MODEL inconclusive (device 0x{device_code:04X}); XY7025 expected 0x6500"
         )),
     }
@@ -618,9 +618,9 @@ fn test_lifecycle(xy: T<'static>) -> Result<(), String> {
     let mut rebuilt: T<'static> = Xy::with_slave(transport, PACK_MODEL, 1).map_err(driver_error)?;
 
     // Final round-trip on the rebuilt instance.
-    let check = rebuilt.verify_model().map_err(driver_error)?;
-    if !matches!(check, ModelCheck::Match { .. }) {
-        return Err(format!("rebuilt verify_model: {check:?}"));
+    let check = rebuilt.verify_scale_family().map_err(driver_error)?;
+    if !matches!(check, ScaleCheck::Compatible { .. }) {
+        return Err(format!("rebuilt scale-family check: {check:?}"));
     }
     Ok(())
 }

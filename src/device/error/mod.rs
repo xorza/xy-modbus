@@ -2,12 +2,53 @@ use core::fmt;
 
 use crate::transport::RtuError;
 
+/// High-level API field rejected during input validation.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(u8)]
+pub enum InputField {
+    VoltageSetpoint,
+    CurrentSetpoint,
+    LowVoltageProtection,
+    OverVoltageProtection,
+    OverCurrentProtection,
+    OverPowerProtection,
+    OverTemperatureProtection,
+    OutputTimeHours,
+    OutputTimeMinutes,
+    ChargeLimit,
+    EnergyLimit,
+    Backlight,
+    SleepTimeout,
+}
+
+impl fmt::Display for InputField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::VoltageSetpoint => "voltage setpoint",
+            Self::CurrentSetpoint => "current setpoint",
+            Self::LowVoltageProtection => "low-voltage protection",
+            Self::OverVoltageProtection => "over-voltage protection",
+            Self::OverCurrentProtection => "over-current protection",
+            Self::OverPowerProtection => "over-power protection",
+            Self::OverTemperatureProtection => "over-temperature protection",
+            Self::OutputTimeHours => "output-time hours",
+            Self::OutputTimeMinutes => "output-time minutes",
+            Self::ChargeLimit => "charge limit",
+            Self::EnergyLimit => "energy limit",
+            Self::Backlight => "backlight",
+            Self::SleepTimeout => "sleep timeout",
+        })
+    }
+}
+
 /// Invalid value supplied to the high-level device API.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(u8)]
 pub enum InputError {
-    NonFinite { field: &'static str },
-    OutOfRange { field: &'static str },
+    NonFinite { field: InputField },
+    OutOfRange { field: InputField },
     InvalidSlaveAddress { address: u8 },
     InvalidGroup { group: u8 },
 }

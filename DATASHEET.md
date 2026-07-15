@@ -15,8 +15,13 @@ any official spec because no public official spec exists.
 ## 1. Family overview
 
 The XY-series modules sold under "XYSEMI" / "Sinilink" / generic AliExpress
-listings share a common Modbus-RTU register layout. The differences between
-models are mechanical (max V/A/W, screen size, pinout) — not protocol.
+listings share the core Modbus-RTU function codes and most register addresses.
+Their physical limits, fixed-point scales, optional registers, and memory-group
+layouts differ by family.
+
+This crate's high-level API is verified for XY7025. An explicit custom profile
+can cover devices with the same 14-register group layout; SK-family devices use
+the raw protocol layers because their groups contain a fifteenth register.
 
 | Model      | Vin (V)  | Vout (V) | Iout (A) | Pmax (W) | Notes                              |
 |------------|----------|----------|----------|----------|------------------------------------|
@@ -250,8 +255,8 @@ S-OTP, S-INI — 14 registers).
 > **SK family is 15 registers wide.** The csvke SK120 register PDF (p.2)
 > adds an extra `S-ETP` (external over-temperature protection) at offset
 > `+14` (`0x005E` on M0). On SK120/SK60/SK120X, plan for 15-register
-> groups and a stride that still places M1 at `0x0060`. This crate
-> targets XY6020L/XY7025 and uses the 14-register layout.
+> groups and a stride that still places M1 at `0x0060`. This crate's high-level
+> group API uses the 14-register XY7025 layout and does not expose SK groups.
 
 **Recall semantics.** Writing `1`–`9` to `EXTRACT-M` (`0x001D`) copies
 that group's contents into M0; the change takes effect immediately.

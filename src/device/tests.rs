@@ -5,6 +5,7 @@ use std::vec::Vec;
 
 use super::*;
 use crate::framing::ModbusError;
+use crate::types::model::{ModelLimits, ModelRange, ModelScales};
 
 /// Scriptable transport for tests. Each script entry pairs a
 /// register-or-value request with a canned response or error.
@@ -22,9 +23,45 @@ struct MockTransport {
 
 fn custom_model(current_scale: u16, power_scale: u16, opp_scale: u16) -> Model {
     Model::Custom {
-        current_scale: NonZeroU16::new(current_scale).unwrap(),
-        power_scale: NonZeroU16::new(power_scale).unwrap(),
-        opp_scale: NonZeroU16::new(opp_scale).unwrap(),
+        scales: ModelScales {
+            current: NonZeroU16::new(current_scale).unwrap(),
+            power: NonZeroU16::new(power_scale).unwrap(),
+            over_power: NonZeroU16::new(opp_scale).unwrap(),
+        },
+        limits: ModelLimits {
+            voltage_set_v: ModelRange {
+                min: 0.0,
+                max: 60.0,
+            },
+            current_set_a: ModelRange {
+                min: 0.0,
+                max: 10.0,
+            },
+            lvp_v: ModelRange {
+                min: 5.0,
+                max: 65.0,
+            },
+            ovp_v: ModelRange {
+                min: 0.0,
+                max: 60.0,
+            },
+            ocp_a: ModelRange {
+                min: 0.0,
+                max: 12.0,
+            },
+            opp_w: ModelRange {
+                min: 0.0,
+                max: 600.0,
+            },
+            charge_limit_ah: ModelRange {
+                min: 0.0,
+                max: 100.0,
+            },
+            energy_limit_wh: ModelRange {
+                min: 0.0,
+                max: 1000.0,
+            },
+        },
     }
 }
 
@@ -96,12 +133,12 @@ fn status_fixture(live: [u16; 6]) -> Vec<u16> {
     v
 }
 
-/// Same wire bytes decoded under XY7025 vs a Custom (SK-style) scale family
+/// Same wire bytes decoded under XY7025 vs a higher-resolution custom profile
 /// must yield 10× different physical values for I-SET, IOUT, S-OCP and POWER.
 /// Locks in that `Model` actually changes behavior — a no-op `current_scale`
 /// would silently report the same numbers.
 #[test]
-fn model_scales_diverge_between_xy7025_and_sk_custom() {
+fn model_scales_diverge_between_xy7025_and_custom_profile() {
     // 1000 raw with /100 → 10.00 A, with /1000 → 1.000 A.
     // 675 raw with /10 → 67.5 W, with /100 → 6.75 W.
     let regs = [1440, 1000, 1350, 1000, 675, 2400];
@@ -131,15 +168,74 @@ fn model_scales_diverge_between_xy7025_and_sk_custom() {
     assert_eq!(s.v_in, 24.00);
 }
 
-/// `Model::Custom` lets users dial in scales for hardware not covered
-/// by the preset variants. Verify the three scale getters route
-/// through the supplied values verbatim.
+/// Custom profiles route both scales and physical limits through the values
+/// supplied by the caller.
 #[test]
-fn custom_model_routes_user_supplied_scales() {
+fn custom_model_routes_user_supplied_capabilities() {
     let m = custom_model(500, 25, 4);
     assert_eq!(m.current_scale(), 500.0);
     assert_eq!(m.power_scale(), 25.0);
     assert_eq!(m.opp_scale(), 4.0);
+    assert_eq!(
+        m.limits().lvp_v,
+        ModelRange {
+            min: 5.0,
+            max: 65.0
+        }
+    );
+
+    let mut xy = Xy::new(MockTransport::new(vec![]), m);
+    assert!(matches!(
+        xy.set_voltage(60.01),
+        Err(XyError::Input(InputError::OutOfRange {
+            field: InputField::VoltageSetpoint
+        }))
+    ));
+    assert!(matches!(
+        xy.set_current_limit(10.01),
+        Err(XyError::Input(InputError::OutOfRange {
+            field: InputField::CurrentSetpoint
+        }))
+    ));
+}
+
+#[test]
+fn custom_model_rejects_invalid_capability_ranges() {
+    let Model::Custom { scales, limits } = custom_model(500, 25, 4) else {
+        unreachable!()
+    };
+    let invalid_limits = [
+        ModelLimits {
+            voltage_set_v: ModelRange {
+                min: 0.0,
+                max: f64::NAN,
+            },
+            ..limits
+        },
+        ModelLimits {
+            lvp_v: ModelRange {
+                min: 65.0,
+                max: 5.0,
+            },
+            ..limits
+        },
+        ModelLimits {
+            current_set_a: ModelRange {
+                min: 0.0,
+                max: 200.0,
+            },
+            ..limits
+        },
+    ];
+
+    for limits in invalid_limits {
+        assert!(
+            std::panic::catch_unwind(|| {
+                Xy::new(MockTransport::new(vec![]), Model::Custom { scales, limits })
+            })
+            .is_err()
+        );
+    }
 }
 
 #[test]
@@ -329,6 +425,15 @@ fn write_group_round_trips_through_encode() {
     }]);
     let mut xy = Xy::new(mock, Model::Xy7025);
     xy.write_group(2, &p).unwrap();
+
+    let mut invalid = p;
+    invalid.safety_limits.lvp_v = 9.99;
+    assert_eq!(
+        xy.write_group(2, &invalid),
+        Err(XyError::Input(InputError::OutOfRange {
+            field: InputField::LowVoltageProtection
+        }))
+    );
 }
 
 #[test]
@@ -634,19 +739,56 @@ fn temp_unit_round_trip() {
 }
 
 /// XY7025 must report the documented family scales (DATASHEET §3).
-/// `Custom` is verified separately in `custom_model_routes_user_supplied_scales`.
+/// `Custom` is verified separately in
+/// `custom_model_routes_user_supplied_capabilities`.
 #[test]
 fn preset_models_match_datasheet_scales() {
     let m = Model::Xy7025;
     assert_eq!(m.current_scale(), 100.0);
     assert_eq!(m.power_scale(), 10.0);
     assert_eq!(m.opp_scale(), 1.0);
+    assert_eq!(
+        m.limits(),
+        ModelLimits {
+            voltage_set_v: ModelRange {
+                min: 0.0,
+                max: 70.0,
+            },
+            current_set_a: ModelRange {
+                min: 0.0,
+                max: 25.0,
+            },
+            lvp_v: ModelRange {
+                min: 10.0,
+                max: 95.0,
+            },
+            ovp_v: ModelRange {
+                min: 0.0,
+                max: 72.0,
+            },
+            ocp_a: ModelRange {
+                min: 0.0,
+                max: 27.0,
+            },
+            opp_w: ModelRange {
+                min: 0.0,
+                max: 2000.0,
+            },
+            charge_limit_ah: ModelRange {
+                min: 0.0,
+                max: 9999.0,
+            },
+            energy_limit_wh: ModelRange {
+                min: 0.0,
+                max: 4_200_000.0,
+            },
+        }
+    );
 }
 
-/// `Custom` with SK-style scales must use `opp_scale=10` (S-OPP raw stores
-/// 0.1 W units), distinct from XY7025 which stores whole watts.
+/// A custom 0.1 W S-OPP scale must remain distinct from XY7025 whole watts.
 #[test]
-fn group_encode_under_custom_sk_scales_uses_opp_scale_10() {
+fn group_encode_uses_custom_scales_and_limits() {
     // 18.0 W S-OPP → raw 180 with opp_scale=10, would be 18 on XY7025.
     let p = GroupParams {
         setpoints: Setpoints {
@@ -654,7 +796,7 @@ fn group_encode_under_custom_sk_scales_uses_opp_scale_10() {
             i_set: 1.0,
         },
         safety_limits: SafetyLimits {
-            lvp_v: 0.0,
+            lvp_v: 5.0,
             ovp_v: 0.0,
             ocp_a: 0.0,
         },
@@ -668,8 +810,8 @@ fn group_encode_under_custom_sk_scales_uses_opp_scale_10() {
     };
     let mock = MockTransport::new(vec![Op::WriteMany {
         addr: group_addr(0),
-        // v_set=500, i_set=1000 (current_scale=1000), s_opp=180, s_otp=0.
-        values: vec![500, 1000, 0, 0, 0, 180, 0, 0, 0, 0, 0, 0, 0, 0],
+        // v_set=500, i_set=1000, lvp=500, s_opp=180, s_otp=0.
+        values: vec![500, 1000, 500, 0, 0, 180, 0, 0, 0, 0, 0, 0, 0, 0],
     }]);
     let mut xy = Xy::new(mock, custom_model(1000, 100, 10));
     xy.write_group(0, &p).unwrap();
@@ -704,6 +846,16 @@ fn invalid_inputs_fail_before_transport_io() {
     );
 
     let mut xy = Xy::new(MockTransport::new(vec![]), Model::Xy7025);
+    assert_eq!(
+        xy.set_protection(SafetyLimits {
+            lvp_v: 9.99,
+            ovp_v: 15.0,
+            ocp_a: 12.5,
+        }),
+        Err(XyError::Input(InputError::OutOfRange {
+            field: InputField::LowVoltageProtection
+        }))
+    );
     for result in [
         xy.set_voltage(f32::NAN),
         xy.set_voltage(f32::INFINITY),
@@ -725,7 +877,16 @@ fn paired_register_conversions_round_trip_every_precision_boundary() {
     for scale in [100.0, 1000.0] {
         for raw in [0, 1, 16_777_217, 420_000_001, u32::MAX] {
             let value = from_reg_u32(raw as u16, (raw >> 16) as u16, scale);
-            let words = to_reg_u32(value, scale, u32::MAX as f64 / scale, "fixture").unwrap();
+            let words = to_reg_u32(
+                value,
+                scale,
+                ModelRange {
+                    min: 0.0,
+                    max: u32::MAX as f64 / scale,
+                },
+                InputField::EnergyLimit,
+            )
+            .unwrap();
             let round_trip = ((words.high as u32) << 16) | words.low as u32;
             assert_eq!(round_trip, raw, "scale={scale}, raw={raw}");
         }
@@ -733,7 +894,7 @@ fn paired_register_conversions_round_trip_every_precision_boundary() {
 }
 
 #[test]
-fn verify_model_match_for_xy7025() {
+fn verify_scale_family_compatible_for_xy7025() {
     let mut xy = Xy::new(
         MockTransport::new(vec![
             Op::Read {
@@ -748,21 +909,21 @@ fn verify_model_match_for_xy7025() {
         Model::Xy7025,
     );
     assert_eq!(
-        xy.verify_model().unwrap(),
-        ModelCheck::Match {
+        xy.verify_scale_family().unwrap(),
+        ScaleCheck::Compatible {
             device_code: 0x6500
         }
     );
     assert_eq!(
-        xy.verify_model().unwrap(),
-        ModelCheck::Match {
+        xy.verify_scale_family().unwrap(),
+        ScaleCheck::Compatible {
             device_code: 0x6100
         }
     );
 }
 
 #[test]
-fn verify_model_is_inconclusive_for_unknown_code() {
+fn verify_scale_family_is_inconclusive_for_unknown_code() {
     let mut xy = Xy::new(
         MockTransport::new(vec![Op::Read {
             addr: REG_MODEL,
@@ -771,15 +932,15 @@ fn verify_model_is_inconclusive_for_unknown_code() {
         Model::Xy7025,
     );
     assert_eq!(
-        xy.verify_model().unwrap(),
-        ModelCheck::Inconclusive {
+        xy.verify_scale_family().unwrap(),
+        ScaleCheck::Inconclusive {
             device_code: 0x7700
         }
     );
 }
 
 #[test]
-fn verify_model_inconclusive_for_custom() {
+fn verify_scale_family_inconclusive_for_custom() {
     let mut xy = Xy::new(
         MockTransport::new(vec![Op::Read {
             addr: REG_MODEL,
@@ -788,8 +949,8 @@ fn verify_model_inconclusive_for_custom() {
         custom_model(100, 10, 1),
     );
     assert_eq!(
-        xy.verify_model().unwrap(),
-        ModelCheck::Inconclusive {
+        xy.verify_scale_family().unwrap(),
+        ScaleCheck::Inconclusive {
             device_code: 0x6500
         }
     );

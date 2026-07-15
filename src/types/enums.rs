@@ -6,7 +6,6 @@ use core::fmt;
 /// Regulation mode reported by `CVCC` (register 0x0011).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RegMode {
     ConstantVoltage,
     ConstantCurrent,
@@ -25,7 +24,6 @@ impl RegMode {
 /// Temperature unit selected by `F-C` (register 0x0013).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TempUnit {
     Celsius,
     Fahrenheit,
@@ -53,7 +51,6 @@ impl TempUnit {
 /// latched until written back to 0.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ProtectionStatus {
     /// Operating normally.
     Normal,
@@ -125,7 +122,6 @@ impl fmt::Display for ProtectionStatus {
 /// committing a write. Baud changes take effect after device reset.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BaudRate {
     B9600,
     B14400,

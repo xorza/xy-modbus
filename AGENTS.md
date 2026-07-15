@@ -4,10 +4,12 @@ This file provides guidance to coding agents working in this repository.
 
 ## Crate scope
 
-`xy-modbus` is a `no_std` Modbus-RTU driver for the XY-series
-programmable buck converters (XY7025, XY6020L, XY6015, XY-SK60/120/120X). All
-variants share one register layout — model differences are mechanical (V/A/W
-limits) and per-model fixed-point scales.
+`xy-modbus` is a `no_std` Modbus-RTU driver whose high-level API targets the
+XY7025 programmable buck converter. Devices with the same 14-register group
+layout can use an explicit custom profile; SK-family devices have a 15-register
+layout and currently use the raw framing/transport layers. Related variants
+share the core function codes but differ in fixed-point scales, physical limits,
+and optional registers.
 
 ## Workspace boundary
 
@@ -21,7 +23,7 @@ cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 cargo build --no-default-features         # exercise pure-no_std path
-cargo build --features defmt,serde
+cargo build --features defmt
 ```
 
 `cargo test <name>` runs a single test. Tests use `extern crate std;` inside
@@ -39,8 +41,9 @@ Three layers, cleanly separated; each can be used standalone:
    per-read inactivity timeout (see `DATASHEET.md` §2).
 3. **`device`** — `Xy<T: ModbusTransport>` high-level API: one method per
    logical operation. Fixed-point conversion (`to_reg` / `from_reg`) lives
-   here; the per-model current/power scales come from `Model` and getting
-   the model wrong silently yields readings off by 10×.
+   here; scales and physical write limits come from `Model`. Getting the scale
+   family wrong silently yields readings off by 10×, so
+   `verify_scale_family` should run during bring-up.
 
 `uart::UartTransport` (gated behind the default `embedded-io` feature) is a
 ready-made transport over any `embedded-io` UART. Disable default features to
@@ -99,8 +102,9 @@ encoded in the driver / datasheet — keep them in mind when extending:
 
 ## Project-specific conventions
 
-- Always derive `Debug` on structs; `defmt` and `serde` derives are
-  feature-gated where applicable.
+- Always derive `Debug` on structs; `defmt` derives are feature-gated where
+  applicable.
+- Update `CHANGELOG.md` whenever public behavior or the public API changes.
 - No backwards-compat shims — rename freely, rewrite callers.
 - Tests must verify exact computed values (e.g. CRC bytes, decoded floats),
   not just "doesn't panic".

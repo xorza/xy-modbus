@@ -1,5 +1,6 @@
-//! Driver for the XY7025 programmable buck converter (and protocol-compatible
-//! siblings via `Model::Custom`).
+//! Driver for the XY7025 programmable buck converter. Devices with the same
+//! 14-register group layout can use an explicit [`Model::Custom`] profile;
+//! other XY-series devices remain accessible through the raw protocol layers.
 //!
 //! These modules share a common Modbus-RTU register layout — see the
 //! crate's `DATASHEET.md` for the full protocol reference.
@@ -63,12 +64,12 @@ pub mod uart;
 pub mod esp_idf;
 
 pub use device::Xy;
-pub use device::error::{InputError, XyError};
+pub use device::error::{InputError, InputField, XyError};
 pub use framing::{FrameError, ModbusError};
 pub use transport::{IoOperation, ModbusTransport, RtuError};
 pub use types::enums::{BaudRate, ProtectionStatus, RegMode, TempUnit};
 pub use types::group::GroupParams;
-pub use types::model::{Model, ModelCheck};
+pub use types::model::{Model, ModelLimits, ModelRange, ModelScales, ScaleCheck};
 pub use types::status::{OnTime, SafetyLimits, Setpoints, Status, Temperatures, Totals};
 
 #[cfg(feature = "embedded-io")]

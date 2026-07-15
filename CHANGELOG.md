@@ -8,8 +8,9 @@ repository has no branch named `main`.
 
 ### Added
 
-- Added `InputError` and `XyError` to distinguish invalid API input, invalid
-  device register data, and Modbus transport failures.
+- Added compact, typed `InputField`, `InputError`, and `XyError` values to
+  distinguish invalid API input, invalid device register data, and Modbus
+  transport failures without storing string pointers in embedded errors.
 - Added model-aware validation for voltage, current, protection, group, slave,
   display, sleep, baud-rate, and temperature-unit writes before any I/O occurs.
 - Added `Xy::read_raw_holding` and `Xy::write_raw_holding` for raw register access
@@ -24,6 +25,8 @@ repository has no branch named `main`.
 
 ### Changed
 
+- **Breaking:** Removed the unused `serde` feature and serialization derives
+  from public types.
 - **Breaking:** High-level `Xy` methods now return `XyError`; `Xy::with_slave`
   validates its address and returns `Result`.
 - **Breaking:** Removed the trivial `Xy::slave`, `Xy::model`, and `Xy::transport`
@@ -33,8 +36,9 @@ repository has no branch named `main`.
   32-bit charge and energy fields use `f64`.
 - **Breaking:** `Totals` charge and energy fields use `f64`, and
   `Temperatures::external` is now `Option<f32>`.
-- **Breaking:** Custom model scales use `NonZeroU16`; `ModelCheck` now reports
-  only `Match` or `Inconclusive`; wire-encoded enums no longer expose
+- **Breaking:** Custom models now require explicit scales and physical limits;
+  `verify_scale_family` returns `ScaleCheck::Compatible` or `Inconclusive`
+  without claiming exact model identity. Wire-encoded enums no longer expose
   `Unknown(u16)` variants.
 - **Breaking:** `RtuError::Io` now carries an `IoOperation`. `ModbusError` is
   owned by `framing`, while both errors remain available from the crate root.
@@ -58,6 +62,8 @@ repository has no branch named `main`.
 
 - Rejected non-finite, negative, out-of-model-range, and unrepresentable write
   values instead of silently clamping or normalizing them.
+- Enforced the documented XY7025 LVP minimum of 10 V for standalone and group
+  protection writes.
 - Preserved all `u32` register-pair values across decode/encode round trips by
   using `f64` for cumulative counters and group limits.
 - Recognized both documented XY7025-family model codes, `0x6100` and `0x6500`,

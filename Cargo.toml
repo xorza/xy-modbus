@@ -4,7 +4,7 @@ version = "0.1.1"
 edition = "2024"
 authors = ["xxorza <xxorza@gmail.com>"]
 license = "MIT OR Apache-2.0"
-description = "Modbus-RTU driver for XY-series programmable buck converters (XY6020L, XY6015, XY-SK60/120/120X). Only tested on real XY7025 hardware; other models share the register layout but are unverified."
+description = "no_std Modbus-RTU driver for the XY7025 programmable buck converter, with raw protocol layers for related XY-series devices."
 homepage = "https://github.com/xorza/xy-modbus"
 keywords = ["xy7025", "modbus", "buck", "embedded"]
 categories = ["embedded", "no-std", "hardware-support"]
@@ -25,7 +25,6 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default = ["embedded-io"]
 defmt = ["dep:defmt"]
-serde = ["dep:serde"]
 embedded-io = ["dep:embedded-io", "dep:embedded-hal"]
 # Convenience constructor for esp-idf-hal `UartDriver`. Pulls in
 # esp-idf-hal only on `target_os = "espidf"` builds — enabling the
@@ -35,7 +34,6 @@ esp-idf-hal = ["embedded-io", "dep:esp-idf-hal"]
 
 [dependencies]
 defmt = { version = "1.1", optional = true }
-serde = { version = "1.0", default-features = false, features = ["derive"], optional = true }
 embedded-io = { version = "0.7", optional = true }
 embedded-hal = { version = "1", optional = true }
 

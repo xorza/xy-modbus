@@ -2,15 +2,17 @@
 
 <img src="docs/XY7025.png" alt="XY7025 board" width="400">
 
-`no_std` Modbus-RTU driver for the XY-series programmable buck
-converters (XY7025, XY6020L, XY6015, XY-SK60, XY-SK120, XY-SK120X).
-These modules share a common register layout — the differences between
-models are mechanical (max V/A/W), not protocol.
+`no_std` Modbus-RTU driver for the XY7025 programmable buck converter.
 
-> **Hardware verification:** only the XY7025 has been tested against
-> real hardware (see `examples/esp32c6-test/`). Other models are
-> supported on the basis of the shared register layout documented by
-> third-party reverse engineering, but are **unverified**.
+Only tested on real XY7025 hardware; other models share the register layout but
+are unverified.
+
+The pure framing and transport layers cover the shared XY-series function
+codes. The high-level `Xy` API is verified on XY7025 hardware; compatible
+devices with the same 14-register memory-group layout can use an explicit
+`Model::Custom` profile with caller-supplied scales and physical limits. The SK
+family uses a 15-register layout and is intentionally limited to raw protocol
+access until it has a dedicated profile.
 
 ## Usage
 
@@ -27,11 +29,12 @@ xy.set_output(true)?;
 let s = xy.read_status()?;
 ```
 
-`Model` selects per-register scales for I-OUT, POWER, S-OCP, S-OPP —
-the wrong family silently shifts current and power readings by 10×.
-Call `xy.verify_model()?` at boot to confirm a recognized model code.
-Unknown codes return `ModelCheck::Inconclusive` rather than guessing at
-a scale family.
+`Model` selects both per-register scales and the physical ranges validated
+before writes. The wrong scale family silently shifts current and power
+readings by 10×, so call `xy.verify_scale_family()?` at boot. A
+`ScaleCheck::Compatible` result confirms the wire scales only—not exact hardware
+identity or mechanical limits. Unknown codes and custom profiles return
+`ScaleCheck::Inconclusive`.
 
 ## Transport
 
@@ -52,7 +55,6 @@ The transport implementer owns UART timing. The XY-series wants
 | `embedded-io` | yes     | Bundled `UartTransport` over `BlockingRead + embedded_io::Write`.      |
 | `esp-idf-hal` | no      | `Xy::from_esp_uart` constructor for `esp_idf_hal::UartDriver`.         |
 | `defmt`       | no      | `defmt::Format` derives on public types.                               |
-| `serde`       | no      | `Serialize`/`Deserialize` derives on public types.                     |
 
 ## Boot / safety policy
 

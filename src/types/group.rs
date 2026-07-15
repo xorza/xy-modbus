@@ -13,7 +13,6 @@ use crate::types::status::{SafetyLimits, Setpoints};
 /// range to ~42.9 GWh.
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GroupParams {
     pub setpoints: Setpoints,
     pub safety_limits: SafetyLimits,
