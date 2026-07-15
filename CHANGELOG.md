@@ -56,6 +56,10 @@ repository has no branch named `main`.
 - **Breaking:** `FrameError::InvalidLength` is now `InvalidQuantity`;
   `ModbusError` and `RtuError` also report invalid read/write quantities instead
   of allowing parser or UART assertions.
+- **Breaking:** `build_read_request` now rejects broadcast address `0` with
+  `FrameError::BroadcastRead`. FC06 and FC10 builders continue to accept address
+  `0`, and `UartTransport` transmits those broadcasts without waiting for the
+  response that Modbus explicitly omits.
 - **Breaking:** `UartTransport::release` was replaced by `into_parts`, returning
   the named `UartParts` struct. `BlockingRead` now lives with the UART transport.
 - Consolidated the public surface in `lib.rs`, narrowed internal visibility, and
@@ -106,5 +110,10 @@ repository has no branch named `main`.
   actual behavior.
 - Corrected the backlight range and group-energy unit documentation, and made
   memory-group address calculation enforce its index precondition.
+- Corrected protection code 8 (`OEP`) from a duplicate cumulative-energy
+  interpretation to the documented internal power-stage/no-output protection,
+  with its exact XY7025 triggers called out as unverified.
+- Documented that FC03 does not guarantee atomic LOW/HIGH counter snapshots and
+  that `read_totals` can tear if firmware updates a pair during rollover.
 - Replaced alignment-sensitive wire-frame diagrams with byte-layout tables and
   corrected package-safe reference links and source-line anchors.

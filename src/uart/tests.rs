@@ -376,19 +376,20 @@ fn slave_zero_panics_on_read() {
 }
 
 #[test]
-#[should_panic(expected = "broadcast")]
-fn slave_zero_panics_on_write_single() {
+fn broadcast_writes_transmit_without_waiting_for_response() {
     let uart = MockUart::new(Vec::new());
     let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
-    let _ = t.write_single_holding(0x00, 0x0000, 0);
-}
+    t.write_single_holding(0, 0x0012, 1).unwrap();
+    t.write_multiple_holdings(0, 0x0052, &[1000, 1500, 1250])
+        .unwrap();
 
-#[test]
-#[should_panic(expected = "broadcast")]
-fn slave_zero_panics_on_write_multiple() {
-    let uart = MockUart::new(Vec::new());
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
-    let _ = t.write_multiple_holdings(0x00, 0x0000, &[0]);
+    assert_eq!(
+        t.into_parts().uart.tx,
+        [
+            0x00, 0x06, 0x00, 0x12, 0x00, 0x01, 0xE9, 0xDE, 0x00, 0x10, 0x00, 0x52, 0x00, 0x03,
+            0x06, 0x03, 0xE8, 0x05, 0xDC, 0x04, 0xE2, 0x65, 0x11,
+        ]
+    );
 }
 
 /// `read_exact` must aggregate across multiple `read()` calls when the

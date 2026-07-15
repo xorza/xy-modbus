@@ -70,7 +70,8 @@ pub enum ProtectionStatus {
     Ohp,
     /// Over-temperature.
     Otp,
-    /// Cumulative energy (Ah) limit reached.
+    /// Internal power-stage/no-output protection. Exact triggers are
+    /// model- and firmware-dependent and remain unverified on XY7025.
     Oep,
     /// Cumulative energy (Wh) limit reached.
     Owh,

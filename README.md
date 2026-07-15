@@ -44,6 +44,10 @@ the `esp-idf-hal` feature and use `Xy::from_esp_uart(uart, model)`.
 To bring your own, implement `transport::ModbusTransport` directly—the
 `framing` module exposes the on-wire codec and errors.
 
+The raw framing and UART layers support standard address-`0` FC06/FC10
+broadcast writes without waiting for a response. The high-level `Xy` API stays
+unicast-only, and broadcast acceptance has not been verified on XY7025.
+
 The transport implementer owns UART timing. The XY-series wants
 ~50 ms between frames and ~500 ms response window; see
 [`DATASHEET.md`](DATASHEET.md) §2.

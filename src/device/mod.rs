@@ -225,6 +225,9 @@ impl<T: ModbusTransport> Xy<T> {
 
     /// Read cumulative output charge, energy, and on-time (registers
     /// 0x0006–0x000C, one transaction).
+    ///
+    /// XY7025 firmware has not been verified to snapshot the LOW/HIGH counter
+    /// pairs atomically, so a read concurrent with low-word rollover may tear.
     pub fn read_totals(&mut self) -> Result<Totals, XyError> {
         let mut r = [0u16; 7];
         self.transport

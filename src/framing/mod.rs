@@ -3,6 +3,8 @@
 //! Use these to build a [`crate::transport::ModbusTransport`] over your platform's
 //! UART. The codec is general Modbus-RTU (function codes `0x03`, `0x06`,
 //! `0x10`); nothing in here is XY-specific.
+//! Address `0` is accepted for write broadcasts; read requests must use a
+//! unicast slave address because broadcasts never receive a response.
 //!
 //! CRC-16 is the standard reflected polynomial `0xA001`, seeded
 //! `0xFFFF`, no final XOR. The CRC is appended low-byte first.
@@ -70,6 +72,8 @@ impl core::error::Error for ModbusError {}
 pub enum FrameError {
     /// Register quantity was zero or exceeded the function-code limit.
     InvalidQuantity(usize),
+    /// Read requests cannot use the broadcast address because no slave replies.
+    BroadcastRead,
     /// `out` was smaller than the assembled frame (header + payload + CRC).
     BufferTooSmall { needed: usize, actual: usize },
 }
@@ -78,6 +82,7 @@ impl core::fmt::Display for FrameError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidQuantity(n) => write!(f, "invalid register quantity {n}"),
+            Self::BroadcastRead => f.write_str("read request cannot use broadcast address 0"),
             Self::BufferTooSmall { needed, actual } => {
                 write!(f, "buffer too small (need {needed}, have {actual})")
             }
@@ -109,10 +114,13 @@ fn append_crc(buf: &mut [u8], len: usize) {
     buf[len + 1] = (crc >> 8) as u8;
 }
 
-/// Build a `Read Holding Registers` (FC `0x03`) request frame.
+/// Build a unicast `Read Holding Registers` (FC `0x03`) request frame.
 pub fn build_read_request(slave: u8, addr: u16, count: u16) -> Result<[u8; 8], FrameError> {
     if count == 0 || count as usize > MAX_READ_REGS {
         return Err(FrameError::InvalidQuantity(count as usize));
+    }
+    if slave == 0 {
+        return Err(FrameError::BroadcastRead);
     }
     let mut req = [0u8; 8];
     req[0] = slave;
@@ -124,6 +132,8 @@ pub fn build_read_request(slave: u8, addr: u16, count: u16) -> Result<[u8; 8], F
 }
 
 /// Build a `Write Single Holding Register` (FC `0x06`) request frame.
+///
+/// Slave address `0` creates a broadcast request, for which no response exists.
 pub fn build_write_single_request(slave: u8, addr: u16, value: u16) -> [u8; 8] {
     let mut req = [0u8; 8];
     req[0] = slave;
@@ -137,6 +147,8 @@ pub fn build_write_single_request(slave: u8, addr: u16, value: u16) -> [u8; 8] {
 /// Build a `Write Multiple Holding Registers` (FC `0x10`) request into
 /// `out`, returning the number of bytes written. `out` must be at
 /// least `9 + 2 * values.len()` bytes.
+///
+/// Slave address `0` creates a broadcast request, for which no response exists.
 pub fn build_write_multiple_request(
     slave: u8,
     addr: u16,

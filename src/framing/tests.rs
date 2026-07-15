@@ -229,7 +229,7 @@ fn build_read_at_max_count_is_well_formed() {
 }
 
 #[test]
-fn build_read_rejects_invalid_counts() {
+fn build_read_rejects_invalid_requests() {
     assert_eq!(
         build_read_request(0x01, 0x0000, 0),
         Err(FrameError::InvalidQuantity(0))
@@ -237,6 +237,10 @@ fn build_read_rejects_invalid_counts() {
     assert_eq!(
         build_read_request(0x01, 0x0000, MAX_READ_REGS as u16 + 1),
         Err(FrameError::InvalidQuantity(MAX_READ_REGS + 1))
+    );
+    assert_eq!(
+        build_read_request(0, 0x0000, 1),
+        Err(FrameError::BroadcastRead)
     );
 
     let mut empty = [];
@@ -367,6 +371,10 @@ fn frame_error_display_strings() {
     assert_eq!(
         format!("{}", FrameError::InvalidQuantity(0)),
         "invalid register quantity 0"
+    );
+    assert_eq!(
+        format!("{}", FrameError::BroadcastRead),
+        "read request cannot use broadcast address 0"
     );
     assert_eq!(
         format!(

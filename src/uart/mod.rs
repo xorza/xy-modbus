@@ -15,6 +15,8 @@
 //!
 //! Timing defaults use a 500 ms per-read inactivity timeout and a 50 ms
 //! inter-frame gap. Override with [`UartTransport::with_timing`].
+//! Write requests to slave `0` use standard Modbus broadcast semantics: the
+//! frame is flushed and the call returns without waiting for a response.
 
 use embedded_hal::delay::DelayNs;
 use embedded_io::Write;
@@ -205,7 +207,7 @@ where
         }
         let count = dst.len() as u16;
         let req = framing::build_read_request(slave, addr, count)
-            .expect("register quantity validated above");
+            .expect("slave and register quantity validated above");
 
         self.pre_tx_silence()?;
         write_all(&mut self.uart, &req)?;
@@ -224,14 +226,13 @@ where
     }
 
     fn write_single_holding(&mut self, slave: u8, addr: u16, value: u16) -> Result<(), RtuError> {
-        assert!(
-            slave != 0,
-            "single-register write does not support broadcast"
-        );
         let req = framing::build_write_single_request(slave, addr, value);
 
         self.pre_tx_silence()?;
         write_all(&mut self.uart, &req)?;
+        if slave == 0 {
+            return Ok(());
+        }
 
         let resp = read_response(
             &mut self.uart,
@@ -250,10 +251,6 @@ where
         addr: u16,
         values: &[u16],
     ) -> Result<(), RtuError> {
-        assert!(
-            slave != 0,
-            "multi-register write does not support broadcast"
-        );
         if values.is_empty() || values.len() > MAX_WRITE_REGS {
             return Err(RtuError::InvalidQuantity(values.len()));
         }
@@ -265,6 +262,9 @@ where
 
         self.pre_tx_silence()?;
         write_all(&mut self.uart, &self.buf[..n])?;
+        if slave == 0 {
+            return Ok(());
+        }
 
         let resp = read_response(
             &mut self.uart,

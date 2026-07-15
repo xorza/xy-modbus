@@ -68,6 +68,11 @@ XY7025 specs (from the seller manual):
 | Function codes   | `0x03` read holding, `0x06` write single, `0x10` write multiple |
 | CRC              | Modbus standard CRC-16 (poly `0xA001`, init `0xFFFF`)           |
 
+The raw framing and UART layers support standard Modbus address-`0` FC06/FC10
+broadcast writes. Broadcasts have no response, so a successful transport call
+only confirms that the frame was transmitted. The high-level `Xy` API remains
+unicast-only, and XY7025 broadcast acceptance is not hardware-verified.
+
 Connector pinout (4-pin Molex/JST on the rear of the module):
 
 ```
@@ -160,6 +165,12 @@ physical value (so `1440` with scale `100` = `14.40 V`).
 | `0x001C` | BUZZER      | Buzzer enable (often unimplemented)                                                               | —     | —     | R/W |
 | `0x001D` | EXTRACT-M   | Recall memory group (write 0–9)                                                                   | —     | —     | R/W |
 | `0x001E` | DEVICE      | Device status — unreliable on some FW                                                             | —     | —     | R/W |
+
+`read_totals` fetches `0x0006`–`0x000C` in one FC03 transaction, but neither
+the Modbus specification nor the device documentation guarantees that the
+LOW/HIGH counter pairs are snapshotted atomically. A read concurrent with a
+low-word rollover can therefore tear; accounting-sensitive applications should
+verify the high words before and after the block or retry around rollovers.
 
 ### 3.2 SK-family extras (`0x001F – 0x0023`)
 
@@ -311,7 +322,7 @@ Read codes:
 | 5     | OAH    | Cumulative charge limit reached      |
 | 6     | OHP    | Output time limit reached            |
 | 7     | OTP    | Over-temperature                     |
-| 8     | OEP    | Cumulative energy limit reached (Ah) |
+| 8     | OEP    | Internal power-stage/no-output protection; exact trigger unverified |
 | 9     | OWH    | Cumulative energy limit reached (Wh) |
 | 10    | ICP    | Input over-current / inrush          |
 
@@ -320,6 +331,12 @@ blinks, and the LCD shows the trip code. Writing `0` to `PROTECT`
 (`0x0010`) clears the latched cause and stops the blink — but does
 **not** re-enable the output; you must also write `1` to `ONOFF`
 (`0x0012`).
+
+The [SK-family protocol table](https://github.com/xorza/xy-modbus/blob/master/docs-archive/csvke-XY-SK120X.pdf)
+describes `OEP` as “no-output protection,” and a
+[related XY power-supply manual](https://supereyes.ru/img/instructions/XY-SEP4_manual.pdf)
+uses it when the converter chip's own protection fires. It is not another
+charge or energy limit; the precise XY7025 trigger set remains unverified.
 
 **OVP-on-V-SET-write quirk.** If you write a `V-SET` higher than the
 current `S-OVP`, the device latches OVP immediately, even if the output
@@ -458,8 +475,9 @@ and output state.
   window go unanswered. `src/uart/mod.rs` enforces this before every
   request; tighten with care.
 - **`AH-HIGH` / `WH-HIGH` testing** — the original community docs
-  flag these high words as untested. Don't trust the 32-bit
-  composition without verifying on your hardware.
+  flag these high words as untested, and the firmware's cross-word snapshot
+  behavior is undocumented. Don't assume an FC03 response cannot tear at a
+  low-word rollover without verifying on your hardware.
 - **Temperature in F vs C** — `T_IN`/`T_EX` units are governed by
   `F-C` (`0x0013`). Set this to `0` (Celsius) at boot if you want
   predictable readings.

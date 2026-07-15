@@ -139,6 +139,9 @@ impl core::error::Error for RtuError {
 
 /// Modbus-RTU transport: send a request, validate the response, hand
 /// back the payload (for reads) or just `Ok(())` (for writes).
+/// Write operations may use slave address `0` for a Modbus broadcast. Because
+/// broadcasts have no response, `Ok(())` then confirms transmission only, not
+/// that any device accepted the write. Reads must use a unicast address.
 ///
 /// Implementers handle UART framing timing — the inter-frame gap, the
 /// per-device read timeout, and the post-write quiet gap. The bundled
@@ -154,12 +157,14 @@ impl core::error::Error for RtuError {
 /// when a multi-write source is empty or exceeds
 /// [`crate::framing::MAX_WRITE_REGS`].
 pub trait ModbusTransport {
-    /// Read `dst.len()` holding registers.
+    /// Read `dst.len()` holding registers from a unicast slave.
     fn read_holding(&mut self, slave: u8, addr: u16, dst: &mut [u16]) -> Result<(), RtuError>;
 
+    /// Write one holding register; slave `0` broadcasts without acknowledgement.
     fn write_single_holding(&mut self, slave: u8, addr: u16, value: u16) -> Result<(), RtuError>;
 
-    /// Write every holding register in `values`.
+    /// Write every holding register in `values`; slave `0` broadcasts without
+    /// acknowledgement.
     fn write_multiple_holdings(
         &mut self,
         slave: u8,
