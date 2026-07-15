@@ -29,10 +29,12 @@ pub const MAX_READ_REGS: usize = 125;
 /// (Modbus standard limit).
 pub const MAX_WRITE_REGS: usize = 123;
 
-/// Protocol-layer error: a frame was received but failed validation.
+/// Framing-layer error: a parser input or received frame failed validation.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ModbusError {
+    /// Caller requested zero registers or exceeded the function-code limit.
+    InvalidQuantity(usize),
     /// Response was shorter than the expected reply.
     ShortResponse(usize),
     /// Slave address byte didn't match the request.
@@ -50,6 +52,7 @@ pub enum ModbusError {
 impl fmt::Display for ModbusError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidQuantity(n) => write!(f, "invalid register quantity {n}"),
             Self::ShortResponse(n) => write!(f, "short response ({n} bytes)"),
             Self::BadSlave(a) => write!(f, "wrong slave id 0x{a:02X}"),
             Self::BadHeader => write!(f, "malformed header"),
@@ -61,12 +64,12 @@ impl fmt::Display for ModbusError {
 
 impl core::error::Error for ModbusError {}
 
-/// Why [`build_write_multiple_request`] could not assemble a frame.
+/// Why a request builder could not assemble a frame.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum FrameError {
-    /// `values` was empty or exceeded [`MAX_WRITE_REGS`] (123).
-    InvalidLength(usize),
+    /// Register quantity was zero or exceeded the function-code limit.
+    InvalidQuantity(usize),
     /// `out` was smaller than the assembled frame (header + payload + CRC).
     BufferTooSmall { needed: usize, actual: usize },
 }
@@ -74,7 +77,7 @@ pub enum FrameError {
 impl core::fmt::Display for FrameError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::InvalidLength(n) => write!(f, "invalid register count {n}"),
+            Self::InvalidQuantity(n) => write!(f, "invalid register quantity {n}"),
             Self::BufferTooSmall { needed, actual } => {
                 write!(f, "buffer too small (need {needed}, have {actual})")
             }
@@ -109,7 +112,7 @@ fn append_crc(buf: &mut [u8], len: usize) {
 /// Build a `Read Holding Registers` (FC `0x03`) request frame.
 pub fn build_read_request(slave: u8, addr: u16, count: u16) -> Result<[u8; 8], FrameError> {
     if count == 0 || count as usize > MAX_READ_REGS {
-        return Err(FrameError::InvalidLength(count as usize));
+        return Err(FrameError::InvalidQuantity(count as usize));
     }
     let mut req = [0u8; 8];
     req[0] = slave;
@@ -141,7 +144,7 @@ pub fn build_write_multiple_request(
     out: &mut [u8],
 ) -> Result<usize, FrameError> {
     if values.is_empty() || values.len() > MAX_WRITE_REGS {
-        return Err(FrameError::InvalidLength(values.len()));
+        return Err(FrameError::InvalidQuantity(values.len()));
     }
     let bc = 2 * values.len();
     let len = 7 + bc + 2;
@@ -161,6 +164,51 @@ pub fn build_write_multiple_request(
     }
     append_crc(out, 7 + bc);
     Ok(len)
+}
+
+#[cfg(feature = "embedded-io")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ResponseShape {
+    ReadHolding { register_count: usize },
+    WriteSingle,
+    WriteMultiple,
+}
+
+#[cfg(feature = "embedded-io")]
+pub(crate) fn response_adu_len(
+    prefix: [u8; 3],
+    slave: u8,
+    shape: ResponseShape,
+) -> Result<usize, ModbusError> {
+    if prefix[0] != slave {
+        return Err(ModbusError::BadSlave(prefix[0]));
+    }
+    let expected_fn = match shape {
+        ResponseShape::ReadHolding { register_count } => {
+            if register_count == 0 || register_count > MAX_READ_REGS {
+                return Err(ModbusError::InvalidQuantity(register_count));
+            }
+            FN_READ_HOLDING
+        }
+        ResponseShape::WriteSingle => FN_WRITE_SINGLE,
+        ResponseShape::WriteMultiple => FN_WRITE_MULTIPLE,
+    };
+    if prefix[1] == expected_fn | EXCEPTION_BIT {
+        return Ok(5);
+    }
+    if prefix[1] != expected_fn {
+        return Err(ModbusError::BadHeader);
+    }
+    match shape {
+        ResponseShape::ReadHolding { register_count } => {
+            let byte_count = 2 * register_count;
+            if prefix[2] as usize != byte_count {
+                return Err(ModbusError::BadHeader);
+            }
+            Ok(5 + byte_count)
+        }
+        ResponseShape::WriteSingle | ResponseShape::WriteMultiple => Ok(8),
+    }
 }
 
 fn check_crc(resp: &[u8], len: usize) -> Result<(), ModbusError> {
@@ -197,9 +245,12 @@ fn check_exception(resp: &[u8], slave: u8, expected_fn: u8) -> Result<(), Modbus
 }
 
 /// Parse a `Read Holding Registers` response into `out`. The expected
-/// register count is `out.len()`.
+/// register count is `out.len()`; zero or more than [`MAX_READ_REGS`] returns
+/// [`ModbusError::InvalidQuantity`].
 pub fn parse_read_response(resp: &[u8], slave: u8, out: &mut [u16]) -> Result<(), ModbusError> {
-    assert!(!out.is_empty() && out.len() <= MAX_READ_REGS);
+    if out.is_empty() || out.len() > MAX_READ_REGS {
+        return Err(ModbusError::InvalidQuantity(out.len()));
+    }
     check_exception(resp, slave, FN_READ_HOLDING)?;
     let count = out.len();
     let expected_len = 5 + 2 * count;

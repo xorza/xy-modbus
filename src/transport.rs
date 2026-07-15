@@ -31,6 +31,8 @@ impl fmt::Display for IoOperation {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum RtuError {
+    /// Caller requested zero registers or exceeded the function-code limit.
+    InvalidQuantity(usize),
     /// No (or insufficient) bytes received within the response window.
     Timeout,
     /// Underlying UART returned an I/O error.
@@ -43,6 +45,7 @@ pub enum RtuError {
 impl fmt::Display for RtuError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidQuantity(n) => write!(f, "invalid register quantity {n}"),
             Self::Timeout => f.write_str("UART response timed out"),
             Self::Io { operation } => write!(f, "UART {operation} error"),
             Self::Modbus(e) => fmt::Display::fmt(e, f),
@@ -52,7 +55,10 @@ impl fmt::Display for RtuError {
 
 impl From<ModbusError> for RtuError {
     fn from(e: ModbusError) -> Self {
-        Self::Modbus(e)
+        match e {
+            ModbusError::InvalidQuantity(quantity) => Self::InvalidQuantity(quantity),
+            error => Self::Modbus(error),
+        }
     }
 }
 
@@ -76,11 +82,18 @@ impl core::error::Error for RtuError {
 /// All three function codes are required; the device API uses each
 /// (`0x03` for reads, `0x06` for single setpoint writes, `0x10` for
 /// bulk memory-group writes).
+///
+/// Implementations must return [`RtuError::InvalidQuantity`] before I/O when a
+/// read destination is empty or exceeds [`crate::framing::MAX_READ_REGS`], or
+/// when a multi-write source is empty or exceeds
+/// [`crate::framing::MAX_WRITE_REGS`].
 pub trait ModbusTransport {
+    /// Read `dst.len()` holding registers.
     fn read_holding(&mut self, slave: u8, addr: u16, dst: &mut [u16]) -> Result<(), RtuError>;
 
     fn write_single_holding(&mut self, slave: u8, addr: u16, value: u16) -> Result<(), RtuError>;
 
+    /// Write every holding register in `values`.
     fn write_multiple_holdings(
         &mut self,
         slave: u8,
@@ -97,6 +110,10 @@ mod tests {
 
     #[test]
     fn rtu_error_display_strings() {
+        assert_eq!(
+            format!("{}", RtuError::InvalidQuantity(0)),
+            "invalid register quantity 0"
+        );
         assert_eq!(format!("{}", RtuError::Timeout), "UART response timed out");
         assert_eq!(
             format!(
@@ -118,8 +135,13 @@ mod tests {
     #[test]
     fn rtu_error_source_chain() {
         use core::error::Error;
+        assert_eq!(
+            RtuError::from(ModbusError::InvalidQuantity(126)),
+            RtuError::InvalidQuantity(126)
+        );
         let e = RtuError::Modbus(ModbusError::BadCrc);
         assert!(e.source().is_some());
+        assert!(RtuError::InvalidQuantity(0).source().is_none());
         assert!(RtuError::Timeout.source().is_none());
         assert!(
             RtuError::Io {

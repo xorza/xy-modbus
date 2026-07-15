@@ -47,6 +47,9 @@ repository has no branch named `main`.
   `Unknown(u16)` variants.
 - **Breaking:** `RtuError::Io` now carries an `IoOperation`. `ModbusError` is
   owned by `framing`, while both errors remain available from the crate root.
+- **Breaking:** `FrameError::InvalidLength` is now `InvalidQuantity`;
+  `ModbusError` and `RtuError` also report invalid read/write quantities instead
+  of allowing parser or UART assertions.
 - **Breaking:** `UartTransport::release` was replaced by `into_parts`, returning
   the named `UartParts` struct. `BlockingRead` now lives with the UART transport.
 - Consolidated the public surface in `lib.rs`, narrowed internal visibility, and
@@ -85,5 +88,8 @@ repository has no branch named `main`.
 - Validated read quantities before frame construction, checked exception replies
   against the requested function, and rejected otherwise-valid frames with
   trailing bytes.
+- Derived response lengths from validated slave/function/byte-count prefixes so
+  complete malformed replies return header errors instead of timing out while
+  waiting for request-predicted bytes.
 - Documented the UART timeout as a per-read inactivity timeout, matching its
   actual behavior.

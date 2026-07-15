@@ -19,11 +19,7 @@
 use embedded_hal::delay::DelayNs;
 use embedded_io::Write;
 
-use crate::framing::{
-    EXCEPTION_BIT, MAX_ADU, MAX_READ_REGS, MAX_WRITE_REGS, build_read_request,
-    build_write_multiple_request, build_write_single_request, parse_read_response,
-    parse_write_multiple_response, parse_write_single_response,
-};
+use crate::framing::{self, MAX_ADU, MAX_READ_REGS, MAX_WRITE_REGS, ResponseShape};
 use crate::transport::{IoOperation, ModbusTransport, RtuError};
 
 // `write_multiple_holdings` builds the request frame into `self.buf` and
@@ -174,23 +170,18 @@ fn read_exact<U: BlockingRead>(
     Ok(())
 }
 
-/// Read a response of expected length `full_len`, short-circuiting on a
-/// 5-byte Modbus exception frame.
+/// Read and classify a response prefix before acquiring the remaining bytes.
 fn read_response<'b, U: BlockingRead>(
     uart: &mut U,
     buf: &'b mut [u8],
-    full_len: usize,
+    slave: u8,
+    shape: ResponseShape,
     read_timeout_ms: u32,
 ) -> Result<&'b [u8], RtuError> {
-    assert!(full_len >= 5 && full_len <= buf.len());
     read_exact(uart, &mut buf[..3], read_timeout_ms)?;
-    if buf[1] & EXCEPTION_BIT != 0 {
-        read_exact(uart, &mut buf[3..5], read_timeout_ms)?;
-        return Ok(&buf[..5]);
-    }
-    if full_len > 3 {
-        read_exact(uart, &mut buf[3..full_len], read_timeout_ms)?;
-    }
+    let full_len = framing::response_adu_len([buf[0], buf[1], buf[2]], slave, shape)?;
+    debug_assert!((5..=buf.len()).contains(&full_len));
+    read_exact(uart, &mut buf[3..full_len], read_timeout_ms)?;
     Ok(&buf[..full_len])
 }
 
@@ -201,10 +192,12 @@ where
 {
     fn read_holding(&mut self, slave: u8, addr: u16, dst: &mut [u16]) -> Result<(), RtuError> {
         assert!(slave != 0, "read does not support broadcast");
-        assert!(!dst.is_empty() && dst.len() <= MAX_READ_REGS);
+        if dst.is_empty() || dst.len() > MAX_READ_REGS {
+            return Err(RtuError::InvalidQuantity(dst.len()));
+        }
         let count = dst.len() as u16;
-        let req = build_read_request(slave, addr, count).expect("register count validated above");
-        let expected_len = 5 + 2 * dst.len();
+        let req = framing::build_read_request(slave, addr, count)
+            .expect("register quantity validated above");
 
         self.pre_tx_silence();
         write_all(&mut self.uart, &req)?;
@@ -212,10 +205,13 @@ where
         let resp = read_response(
             &mut self.uart,
             &mut self.buf,
-            expected_len,
+            slave,
+            ResponseShape::ReadHolding {
+                register_count: dst.len(),
+            },
             self.read_timeout_ms,
         )?;
-        parse_read_response(resp, slave, dst)?;
+        framing::parse_read_response(resp, slave, dst)?;
         Ok(())
     }
 
@@ -224,13 +220,19 @@ where
             slave != 0,
             "single-register write does not support broadcast"
         );
-        let req = build_write_single_request(slave, addr, value);
+        let req = framing::build_write_single_request(slave, addr, value);
 
         self.pre_tx_silence();
         write_all(&mut self.uart, &req)?;
 
-        let resp = read_response(&mut self.uart, &mut self.buf, 8, self.read_timeout_ms)?;
-        parse_write_single_response(resp, &req)?;
+        let resp = read_response(
+            &mut self.uart,
+            &mut self.buf,
+            slave,
+            ResponseShape::WriteSingle,
+            self.read_timeout_ms,
+        )?;
+        framing::parse_write_single_response(resp, &req)?;
         Ok(())
     }
 
@@ -244,18 +246,26 @@ where
             slave != 0,
             "multi-register write does not support broadcast"
         );
-        assert!(!values.is_empty() && values.len() <= MAX_WRITE_REGS);
+        if values.is_empty() || values.len() > MAX_WRITE_REGS {
+            return Err(RtuError::InvalidQuantity(values.len()));
+        }
 
         // Build request into self.buf, send it, then reuse the same
         // buffer for the response — sequential, no aliasing.
-        let n = build_write_multiple_request(slave, addr, values, &mut self.buf)
+        let n = framing::build_write_multiple_request(slave, addr, values, &mut self.buf)
             .expect("inputs validated above");
 
         self.pre_tx_silence();
         write_all(&mut self.uart, &self.buf[..n])?;
 
-        let resp = read_response(&mut self.uart, &mut self.buf, 8, self.read_timeout_ms)?;
-        parse_write_multiple_response(resp, slave, addr, values.len() as u16)?;
+        let resp = read_response(
+            &mut self.uart,
+            &mut self.buf,
+            slave,
+            ResponseShape::WriteMultiple,
+            self.read_timeout_ms,
+        )?;
+        framing::parse_write_multiple_response(resp, slave, addr, values.len() as u16)?;
         Ok(())
     }
 }

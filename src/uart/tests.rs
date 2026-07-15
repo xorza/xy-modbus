@@ -101,14 +101,14 @@ fn read_holding_round_trip() {
 
     // Verify the request that went out matches the canonical encoding.
     let parts = t.into_parts();
-    let expected_req = build_read_request(0x01, 0x0000, 3).unwrap();
+    let expected_req = framing::build_read_request(0x01, 0x0000, 3).unwrap();
     assert_eq!(parts.uart.tx, expected_req);
 }
 
 #[test]
 fn write_single_round_trip() {
     // Echo response.
-    let req = build_write_single_request(0x01, 0x0012, 0x0001);
+    let req = framing::build_write_single_request(0x01, 0x0012, 0x0001);
     let uart = MockUart::new(req.to_vec());
     let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
     t.write_single_holding(0x01, 0x0012, 0x0001).unwrap();
@@ -417,6 +417,53 @@ fn exception_short_circuits_read() {
         t.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
         RtuError::Modbus(ModbusError::Exception(0x02))
     );
+}
+
+#[test]
+fn malformed_complete_responses_return_header_errors_without_timeout() {
+    let frame = frame_with_crc(std::vec![0x01, 0x03, 0x02, 0x00, 0x05]);
+    let uart = MockUart::new(frame);
+    let mut transport = UartTransport::new(uart, NoDelay).with_timing(10, 0);
+    let mut out = [0u16; MAX_READ_REGS];
+    assert_eq!(
+        transport.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
+        RtuError::Modbus(ModbusError::BadHeader)
+    );
+
+    let frame = frame_with_crc(std::vec![0x01, 0x03, 0x02, 0x00, 0x05]);
+    let uart = MockUart::new(frame);
+    let mut transport = UartTransport::new(uart, NoDelay).with_timing(10, 0);
+    assert_eq!(
+        transport.write_single_holding(0x01, 0x0012, 1).unwrap_err(),
+        RtuError::Modbus(ModbusError::BadHeader)
+    );
+}
+
+#[test]
+fn invalid_quantities_fail_before_uart_io() {
+    let uart = MockUart::new(Vec::new());
+    let mut transport = UartTransport::new(uart, NoDelay).with_timing(10, 0);
+
+    let mut empty = [];
+    assert_eq!(
+        transport.read_holding(0x01, 0, &mut empty),
+        Err(RtuError::InvalidQuantity(0))
+    );
+    let mut oversized = [0u16; MAX_READ_REGS + 1];
+    assert_eq!(
+        transport.read_holding(0x01, 0, &mut oversized),
+        Err(RtuError::InvalidQuantity(MAX_READ_REGS + 1))
+    );
+    assert_eq!(
+        transport.write_multiple_holdings(0x01, 0, &[]),
+        Err(RtuError::InvalidQuantity(0))
+    );
+    let oversized = [0u16; MAX_WRITE_REGS + 1];
+    assert_eq!(
+        transport.write_multiple_holdings(0x01, 0, &oversized),
+        Err(RtuError::InvalidQuantity(MAX_WRITE_REGS + 1))
+    );
+    assert!(transport.into_parts().uart.tx.is_empty());
 }
 
 #[test]

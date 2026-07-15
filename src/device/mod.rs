@@ -146,6 +146,8 @@ impl<T: ModbusTransport> Xy<T> {
     }
 
     /// Read holding registers through the configured transport and slave.
+    /// Empty destinations and slices longer than
+    /// [`crate::framing::MAX_READ_REGS`] return [`RtuError::InvalidQuantity`].
     pub fn read_raw_holding(&mut self, addr: u16, dst: &mut [u16]) -> Result<(), RtuError> {
         self.transport.read_holding(self.slave, addr, dst)
     }

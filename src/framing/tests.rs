@@ -56,7 +56,7 @@ fn build_write_multiple_rejects_empty() {
     let mut buf = [0u8; 32];
     assert!(matches!(
         build_write_multiple_request(0x01, 0x0050, &[], &mut buf),
-        Err(FrameError::InvalidLength(0))
+        Err(FrameError::InvalidQuantity(0))
     ));
 }
 
@@ -229,11 +229,73 @@ fn build_read_at_max_count_is_well_formed() {
 fn build_read_rejects_invalid_counts() {
     assert_eq!(
         build_read_request(0x01, 0x0000, 0),
-        Err(FrameError::InvalidLength(0))
+        Err(FrameError::InvalidQuantity(0))
     );
     assert_eq!(
         build_read_request(0x01, 0x0000, MAX_READ_REGS as u16 + 1),
-        Err(FrameError::InvalidLength(MAX_READ_REGS + 1))
+        Err(FrameError::InvalidQuantity(MAX_READ_REGS + 1))
+    );
+
+    let mut empty = [];
+    assert_eq!(
+        parse_read_response(&[], 0x01, &mut empty),
+        Err(ModbusError::InvalidQuantity(0))
+    );
+    let mut oversized = [0u16; MAX_READ_REGS + 1];
+    assert_eq!(
+        parse_read_response(&[], 0x01, &mut oversized),
+        Err(ModbusError::InvalidQuantity(MAX_READ_REGS + 1))
+    );
+}
+
+#[cfg(feature = "embedded-io")]
+#[test]
+fn response_prefix_selects_and_validates_adu_length() {
+    assert_eq!(
+        response_adu_len(
+            [0x01, FN_READ_HOLDING, 4],
+            0x01,
+            ResponseShape::ReadHolding { register_count: 2 },
+        ),
+        Ok(9)
+    );
+    assert_eq!(
+        response_adu_len(
+            [0x01, FN_READ_HOLDING | EXCEPTION_BIT, 2],
+            0x01,
+            ResponseShape::ReadHolding {
+                register_count: MAX_READ_REGS,
+            },
+        ),
+        Ok(5)
+    );
+    assert_eq!(
+        response_adu_len([0x01, FN_WRITE_SINGLE, 0], 0x01, ResponseShape::WriteSingle,),
+        Ok(8)
+    );
+    assert_eq!(
+        response_adu_len(
+            [0x01, FN_WRITE_MULTIPLE, 0],
+            0x01,
+            ResponseShape::WriteMultiple,
+        ),
+        Ok(8)
+    );
+    assert_eq!(
+        response_adu_len(
+            [0x01, FN_READ_HOLDING, 2],
+            0x01,
+            ResponseShape::ReadHolding { register_count: 2 },
+        ),
+        Err(ModbusError::BadHeader)
+    );
+    assert_eq!(
+        response_adu_len(
+            [0x02, FN_READ_HOLDING, 4],
+            0x01,
+            ResponseShape::ReadHolding { register_count: 2 },
+        ),
+        Err(ModbusError::BadSlave(0x02))
     );
 }
 
@@ -257,7 +319,7 @@ fn build_write_multiple_rejects_oversize_payload() {
     let oversized = std::vec![0u16; MAX_WRITE_REGS + 1];
     assert!(matches!(
         build_write_multiple_request(0x01, 0x0050, &oversized, &mut buf),
-        Err(FrameError::InvalidLength(n)) if n == MAX_WRITE_REGS + 1
+        Err(FrameError::InvalidQuantity(n)) if n == MAX_WRITE_REGS + 1
     ));
 }
 
@@ -300,8 +362,8 @@ fn parse_read_response_rejects_byte_count_mismatch() {
 fn frame_error_display_strings() {
     use std::format;
     assert_eq!(
-        format!("{}", FrameError::InvalidLength(0)),
-        "invalid register count 0"
+        format!("{}", FrameError::InvalidQuantity(0)),
+        "invalid register quantity 0"
     );
     assert_eq!(
         format!(
@@ -318,6 +380,10 @@ fn frame_error_display_strings() {
 #[test]
 fn modbus_error_display_strings() {
     use std::format;
+    assert_eq!(
+        format!("{}", ModbusError::InvalidQuantity(0)),
+        "invalid register quantity 0"
+    );
     assert_eq!(
         format!("{}", ModbusError::ShortResponse(3)),
         "short response (3 bytes)"
