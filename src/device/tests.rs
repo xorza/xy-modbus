@@ -148,7 +148,7 @@ fn model_scales_diverge_between_xy7025_and_custom_profile() {
     }]);
     let mut xy = Xy::new(xy7025_mock, Model::Xy7025);
     let s = xy.read_status().unwrap();
-    assert_eq!(s.i_set, 10.00);
+    assert_eq!(s.setpoints.i_set, 10.00);
     assert_eq!(s.i_out, 10.00);
     assert_eq!(s.p_out, 67.5);
 
@@ -158,12 +158,12 @@ fn model_scales_diverge_between_xy7025_and_custom_profile() {
     }]);
     let mut xy = Xy::new(sk_mock, custom_model(1000, 100, 10));
     let s = xy.read_status().unwrap();
-    assert_eq!(s.i_set, 1.000);
+    assert_eq!(s.setpoints.i_set, 1.000);
     assert_eq!(s.i_out, 1.000);
     assert_eq!(s.p_out, 6.75);
 
     // V_SET, V_OUT, V_IN scales are model-invariant (always /100).
-    assert_eq!(s.v_set, 14.40);
+    assert_eq!(s.setpoints.v_set, 14.40);
     assert_eq!(s.v_out, 13.50);
     assert_eq!(s.v_in, 24.00);
 }
@@ -331,8 +331,13 @@ fn read_status_decodes_19_regs_in_one_transaction() {
     }]);
     let mut xy = Xy::new(mock, Model::Xy7025);
     let s = xy.read_status().unwrap();
-    assert_eq!(s.v_set, 14.40);
-    assert_eq!(s.i_set, 10.00);
+    assert_eq!(
+        s.setpoints,
+        Setpoints {
+            v_set: 14.40,
+            i_set: 10.00,
+        }
+    );
     assert_eq!(s.v_out, 13.50);
     assert_eq!(s.i_out, 0.50);
     assert_eq!(s.p_out, 67.5);

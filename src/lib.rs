@@ -6,7 +6,8 @@
 //! crate's `DATASHEET.md` for the full protocol reference.
 //!
 //! ```no_run
-//! # use xy_modbus::{ModbusTransport, RtuError, XyError};
+//! # use xy_modbus::XyError;
+//! # use xy_modbus::transport::{ModbusTransport, RtuError};
 //! # struct MyTransport;
 //! # impl ModbusTransport for MyTransport {
 //! #     fn read_holding(&mut self, _: u8, _: u16, _: &mut [u16]) -> Result<(), RtuError> { unimplemented!() }
@@ -30,9 +31,9 @@
 //! ```
 //!
 //! The crate is `no_std`. With the default `embedded-io` feature, the
-//! [`uart`] module provides a ready-to-use [`ModbusTransport`] over any
+//! [`uart`] module provides a ready-to-use [`transport::ModbusTransport`] over any
 //! `embedded-io` UART. To use a different transport, disable default
-//! features and implement [`ModbusTransport`] yourself; the [`framing`]
+//! features and implement [`transport::ModbusTransport`] yourself; the [`framing`]
 //! module exposes the on-wire codec.
 //!
 //! For `esp-idf-hal` users, the `esp-idf-hal` feature ships a convenience
@@ -65,14 +66,9 @@ pub mod esp_idf;
 
 pub use device::Xy;
 pub use device::error::{InputError, InputField, XyError};
-pub use framing::{FrameError, ModbusError};
-pub use transport::{IoErrorKind, IoOperation, ModbusTransport, RtuError};
 pub use types::enums::{BaudRate, ProtectionStatus, RegMode, TempUnit};
 pub use types::group::GroupParams;
 pub use types::model::{Model, ModelLimits, ModelRange, ModelScales, ScaleCheck};
 pub use types::status::{
     OnTime, SafetyLimits, Setpoints, Status, Temperature, Temperatures, Totals,
 };
-
-#[cfg(feature = "embedded-io")]
-pub use uart::{BlockingRead, UartParts, UartTransport};

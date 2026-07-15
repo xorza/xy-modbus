@@ -4,7 +4,7 @@
 //! Wrap any UART driver that exposes a blocking-with-timeout read (every
 //! kernel-backed HAL does) plus an [`embedded_hal::delay::DelayNs`] timer
 //! for the inter-frame silence, and you have a working
-//! [`ModbusTransport`].
+//! [`crate::transport::ModbusTransport`].
 //!
 //! ```ignore
 //! use xy_modbus::{Xy, uart::UartTransport};

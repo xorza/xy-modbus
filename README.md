@@ -38,11 +38,11 @@ identity or mechanical limits. Unknown codes and custom profiles return
 
 ## Transport
 
-The default `embedded-io` feature ships a `UartTransport` over any
-`BlockingRead + embedded_io::Write` pair. For `esp-idf-hal`, enable
+The default `embedded-io` feature ships `uart::UartTransport` over any
+`uart::BlockingRead + embedded_io::Write` pair. For `esp-idf-hal`, enable
 the `esp-idf-hal` feature and use `Xy::from_esp_uart(uart, model)`.
-To bring your own, implement [`ModbusTransport`] directly — the
-`framing` module exposes the on-wire codec.
+To bring your own, implement `transport::ModbusTransport` directly—the
+`framing` module exposes the on-wire codec and errors.
 
 The transport implementer owns UART timing. The XY-series wants
 ~50 ms between frames and ~500 ms response window; see
@@ -50,26 +50,27 @@ The transport implementer owns UART timing. The XY-series wants
 
 ## Cargo features
 
-| Feature       | Default | Purpose                                                                |
-|---------------|---------|------------------------------------------------------------------------|
-| `embedded-io` | yes     | Bundled `UartTransport` over `BlockingRead + embedded_io::Write`.      |
-| `esp-idf-hal` | no      | `Xy::from_esp_uart` constructor for `esp_idf_hal::UartDriver`.         |
-| `defmt`       | no      | `defmt::Format` derives on public types.                               |
+| Feature       | Default | Purpose                                                                       |
+| ------------- | ------- | ----------------------------------------------------------------------------- |
+| `embedded-io` | yes     | Bundled `uart::UartTransport` over `uart::BlockingRead + embedded_io::Write`. |
+| `esp-idf-hal` | no      | `Xy::from_esp_uart` constructor for `esp_idf_hal::UartDriver`.                |
+| `defmt`       | no      | `defmt::Format` derives on public types.                                      |
 
 ## Boot / safety policy
 
 This crate exposes the device protocol; it intentionally does **not**
 prescribe a power-on / fault-recovery policy. See
 [`DATASHEET.md`](DATASHEET.md) §7 for the recommended bring-up
-checklist (program protection *before* raising V-SET, force OUTPUT_EN
+checklist (program protection _before_ raising V-SET, force OUTPUT_EN
 off until verification passes, etc.).
 
 ## References
 
 - [`DATASHEET.md`](DATASHEET.md) — full register map, CRC algorithm,
   wire-level examples, known firmware quirks.
-- `examples/esp32c6-test/` — on-device 26-test sweep against a real
-  XY7025 over UART, snapshots and restores every writable register.
+- [ESP32-C6 hardware test](examples/esp32c6-test)
+  — on-device 26-test sweep against a real XY7025 over UART, snapshots and
+  restores every writable register.
 - API reference on [docs.rs](https://docs.rs/xy-modbus).
 
 ## License

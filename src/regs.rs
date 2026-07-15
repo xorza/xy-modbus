@@ -49,7 +49,7 @@ pub(crate) const REG_CVCC: u16 = 0x0011;
 pub(crate) const REG_OUTPUT_EN: u16 = 0x0012;
 /// F-C — temperature unit (0 °C, 1 °F).
 pub(crate) const REG_TEMP_UNIT: u16 = 0x0013;
-/// B-LED — backlight brightness (0–5).
+/// B-LED — backlight brightness (1–5; firmware floors 0 to 1).
 pub(crate) const REG_BACKLIGHT: u16 = 0x0014;
 /// SLEEP — off-screen timeout in minutes.
 pub(crate) const REG_SLEEP: u16 = 0x0015;
@@ -81,6 +81,7 @@ pub(crate) const GROUP_COUNT: u8 = 10;
 
 /// Base register address of memory group `n` (0..=9).
 pub(crate) const fn group_addr(n: u8) -> u16 {
+    assert!(n < GROUP_COUNT, "group index out of range");
     GROUP_BASE + (n as u16) * GROUP_STRIDE
 }
 
@@ -122,3 +123,14 @@ const _: () = assert!(REG_S_OCP == REG_S_LVP + 2);
 // `read_temperatures` (T_IN..TEMP_UNIT).
 const _: () = assert!(REG_T_EX == REG_T_IN + 1);
 const _: () = assert!(REG_TEMP_UNIT == REG_T_IN + 6);
+
+#[cfg(test)]
+mod tests {
+    use crate::regs::{GROUP_COUNT, group_addr};
+
+    #[test]
+    #[should_panic(expected = "group index out of range")]
+    fn group_address_rejects_out_of_range_index() {
+        group_addr(GROUP_COUNT);
+    }
+}

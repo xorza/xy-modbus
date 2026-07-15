@@ -1,6 +1,6 @@
 //! Modbus-RTU on-wire framing — pure functions, no I/O.
 //!
-//! Use these to build a [`crate::ModbusTransport`] over your platform's
+//! Use these to build a [`crate::transport::ModbusTransport`] over your platform's
 //! UART. The codec is general Modbus-RTU (function codes `0x03`, `0x06`,
 //! `0x10`); nothing in here is XY-specific.
 //!

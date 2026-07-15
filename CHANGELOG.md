@@ -36,6 +36,8 @@ repository has no branch named `main`.
   `Xy::into_transport` still recovers the transport.
 - **Breaking:** `GroupParams` now embeds `Setpoints` and `SafetyLimits`, and its
   32-bit charge and energy fields use `f64`.
+- **Breaking:** `Status` now embeds `Setpoints` instead of duplicating `v_set`
+  and `i_set` fields.
 - **Breaking:** `Totals` charge and energy fields use `f64`, and
   `Temperatures` now returns unit-tagged `Temperature` values.
 - **Breaking:** `GroupParams::s_otp` is now a unit-tagged `Temperature`;
@@ -48,23 +50,28 @@ repository has no branch named `main`.
 - **Breaking:** `RtuError::Io` now carries an `IoOperation` and portable
   `IoErrorKind`. `BlockingRead` extends `embedded_io::ErrorType` so read and
   write failures preserve the same error classification. `ModbusError` is owned
-  by `framing`, while both errors remain available from the crate root.
+  by `framing` and `RtuError` by `transport`.
+- **Breaking:** Framing, transport, and UART types now have one canonical public
+  path through their modules; their duplicate crate-root aliases were removed.
 - **Breaking:** `FrameError::InvalidLength` is now `InvalidQuantity`;
   `ModbusError` and `RtuError` also report invalid read/write quantities instead
   of allowing parser or UART assertions.
 - **Breaking:** `UartTransport::release` was replaced by `into_parts`, returning
   the named `UartParts` struct. `BlockingRead` now lives with the UART transport.
 - Consolidated the public surface in `lib.rs`, narrowed internal visibility, and
-  removed internal re-export hubs, unused register constants, dead-code
-  suppression, tuple returns, and trivial helpers.
+  removed internal re-export hubs, duplicate protocol-layer aliases, unused
+  register constants, dead-code suppression, tuple returns, and trivial helpers.
 - Set explicit dependency versions in the library and ESP32-C6 example
   manifests, matching their verified lockfile resolutions.
+- Disabled `esp-idf-hal` default features in the library adapter so application
+  startup policy, including `binstart`, remains with the final ESP application.
 - Updated the ESP32-C6 hardware example for validated APIs, raw register access,
   nested group parameters, precise totals, optional external temperature, and
   the revised error model.
 - Ignored the project-local `.venv` used for ESP-IDF tooling.
 - Updated `README.md`, `DATASHEET.md`, and `AGENTS.md` to match the supported
-  model scope, validation behavior, framing rules, and UART timeout semantics.
+  model scope, validation behavior, framing rules, UART timeout semantics,
+  safety API, and packaged documentation links.
 - Renamed the repository guidance to `AGENTS.md`, retained `CLAUDE.md` as a
   compatibility symlink, and excluded both names from the published crate.
 
@@ -97,3 +104,5 @@ repository has no branch named `main`.
   waiting for request-predicted bytes.
 - Documented the UART timeout as a per-read inactivity timeout, matching its
   actual behavior.
+- Corrected the backlight range and group-energy unit documentation, and made
+  memory-group address calculation enforce its index precondition.

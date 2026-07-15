@@ -17,8 +17,7 @@ pub struct Setpoints {
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Status {
-    pub v_set: f32,
-    pub i_set: f32,
+    pub setpoints: Setpoints,
     pub v_out: f32,
     pub i_out: f32,
     pub p_out: f32,

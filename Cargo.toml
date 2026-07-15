@@ -45,4 +45,4 @@ embedded-io = { version = "0.7", optional = true }
 embedded-hal = { version = "1", optional = true }
 
 [target.'cfg(target_os = "espidf")'.dependencies]
-esp-idf-hal = { version = "0.46", optional = true }
+esp-idf-hal = { version = "0.46", optional = true, default-features = false }

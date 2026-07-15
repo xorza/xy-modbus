@@ -356,8 +356,16 @@ fn test_status_consistency(xy: &mut T) -> Result<(), String> {
     let v_in = xy.read_voltage_in().map_err(driver_error)?;
     let on = xy.read_output().map_err(driver_error)?;
     let mode = xy.read_reg_mode().map_err(driver_error)?;
-    expect_approx("status.v_set vs read_setpoints", s.v_set, sp.v_set)?;
-    expect_approx("status.i_set vs read_setpoints", s.i_set, sp.i_set)?;
+    expect_approx(
+        "status.v_set vs read_setpoints",
+        s.setpoints.v_set,
+        sp.v_set,
+    )?;
+    expect_approx(
+        "status.i_set vs read_setpoints",
+        s.setpoints.i_set,
+        sp.i_set,
+    )?;
     expect_approx("status.v_out vs read_voltage_out", s.v_out, v_out)?;
     expect_approx("status.i_out vs read_current_out", s.i_out, i_out)?;
     expect_approx("status.p_out vs read_power_out", s.p_out, p_out)?;
@@ -366,7 +374,15 @@ fn test_status_consistency(xy: &mut T) -> Result<(), String> {
     expect_eq("status.reg_mode vs read_reg_mode", s.reg_mode, mode)?;
     info!(
         "  status: V_SET={:.2} I_SET={:.2} V_OUT={:.2} I_OUT={:.3} P_OUT={:.2} V_IN={:.2} prot={} reg={:?} on={}",
-        s.v_set, s.i_set, s.v_out, s.i_out, s.p_out, s.v_in, s.protection, s.reg_mode, s.output_on,
+        s.setpoints.v_set,
+        s.setpoints.i_set,
+        s.v_out,
+        s.i_out,
+        s.p_out,
+        s.v_in,
+        s.protection,
+        s.reg_mode,
+        s.output_on,
     );
     if s.v_in < 1.0 {
         return Err(format!("V_IN={:.2} — is the buck powered?", s.v_in));
@@ -395,7 +411,7 @@ fn test_voltage_sweep(xy: &mut T) -> Result<(), String> {
         expect_approx(&format!("V_SET={v:.2}"), v, got)?;
         // Also verify status agrees.
         let s = xy.read_status().map_err(driver_error)?;
-        expect_approx(&format!("V_SET={v:.2} via status"), v, s.v_set)?;
+        expect_approx(&format!("V_SET={v:.2} via status"), v, s.setpoints.v_set)?;
     }
     info!("  swept {} V values", V_SET_SAMPLES.len());
     Ok(())

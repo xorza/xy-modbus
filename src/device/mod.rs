@@ -1,5 +1,5 @@
 //! High-level device API. One method per logical operation; all reads
-//! and writes go through the [`crate::ModbusTransport`].
+//! and writes go through the [`crate::transport::ModbusTransport`].
 
 pub(crate) mod error;
 
@@ -26,6 +26,13 @@ fn to_reg_u16(v: f32, scale: f32, range: ModelRange, field: InputField) -> Resul
 
 fn from_reg_u16(raw: u16, scale: f32) -> f32 {
     raw as f32 / scale
+}
+
+fn decode_setpoints(v_set: u16, i_set: u16, current_scale: f32) -> Setpoints {
+    Setpoints {
+        v_set: from_reg_u16(v_set, 100.0),
+        i_set: from_reg_u16(i_set, current_scale),
+    }
 }
 
 fn from_reg_i16(raw: u16, scale: f32) -> f32 {
@@ -166,10 +173,7 @@ impl<T: ModbusTransport> Xy<T> {
     pub fn read_setpoints(&mut self) -> Result<Setpoints, XyError> {
         let mut r = [0u16; 2];
         self.transport.read_holding(self.slave, REG_V_SET, &mut r)?;
-        Ok(Setpoints {
-            v_set: from_reg_u16(r[0], 100.0),
-            i_set: from_reg_u16(r[1], self.model.current_scale()),
-        })
+        Ok(decode_setpoints(r[0], r[1], self.model.current_scale()))
     }
 
     /// Read the live + control snapshot (registers 0x0000–0x0012) in
@@ -185,8 +189,7 @@ impl<T: ModbusTransport> Xy<T> {
         let i_scale = self.model.current_scale();
         let p_scale = self.model.power_scale();
         Ok(Status {
-            v_set: from_reg_u16(r[REG_V_SET as usize], 100.0),
-            i_set: from_reg_u16(r[REG_I_SET as usize], i_scale),
+            setpoints: decode_setpoints(r[REG_V_SET as usize], r[REG_I_SET as usize], i_scale),
             v_out: from_reg_u16(r[REG_V_OUT as usize], 100.0),
             i_out: from_reg_u16(r[REG_I_OUT as usize], i_scale),
             p_out: from_reg_u16(r[REG_P_OUT as usize], p_scale),
@@ -577,10 +580,7 @@ fn decode_group(
         s_ini,
     ] = *r;
     Ok(GroupParams {
-        setpoints: Setpoints {
-            v_set: from_reg_u16(v_set, 100.0),
-            i_set: from_reg_u16(i_set, i_scale),
-        },
+        setpoints: decode_setpoints(v_set, i_set, i_scale),
         safety_limits: SafetyLimits {
             lvp_v: from_reg_u16(s_lvp, 100.0),
             ovp_v: from_reg_u16(s_ovp, 100.0),

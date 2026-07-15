@@ -10,7 +10,7 @@ use crate::types::status::{SafetyLimits, Setpoints, Temperature};
 /// in Wh (encoded raw / 100 — 10 mWh units, *not* the 1 mWh scale used
 /// by the cumulative WH counters at 0x0008/0x0009). The XY firmware
 /// stores the energy threshold in coarser units to extend the 32-bit
-/// range to ~42.9 GWh.
+/// range to ~42.9 MWh.
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct GroupParams {
