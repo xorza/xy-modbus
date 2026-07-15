@@ -14,6 +14,7 @@ repository = "https://github.com/xorza/xy-modbus"
 documentation = "https://docs.rs/xy-modbus"
 exclude = [
     "docs-archive/*",
+    "AGENTS.md",
     "CLAUDE.md",
     "examples/*",
 ]
