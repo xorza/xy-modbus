@@ -21,12 +21,12 @@ opt-level = "z"
 
 [dependencies]
 xy-modbus = { path = "../..", features = ["esp-idf-hal"] }
-log = "*"
-esp-idf-svc = "*"
-esp-idf-hal = "*"
+log = "0.4.29"
+esp-idf-svc = "0.52.1"
+esp-idf-hal = "0.46.2"
 
 [build-dependencies]
-embuild = "*"
+embuild = "0.33.1"
 
 # crates.io esp-idf-sys 0.37.2 fails to generate bindings against
 # ESP-IDF v6.0 + clang 20 (stdio.h __FILE / mbedtls headers). The
