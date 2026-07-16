@@ -21,7 +21,11 @@ fn to_reg_u16(v: f32, scale: f32, range: ModelRange, field: InputField) -> Resul
     if !range.contains(v as f64) || scaled > u16::MAX as f32 + 0.5 {
         return Err(InputError::OutOfRange { field });
     }
-    Ok((scaled + 0.5) as u16)
+    let raw = (scaled + 0.5) as u16;
+    if !range.contains(raw as f64 / scale as f64) {
+        return Err(InputError::OutOfRange { field });
+    }
+    Ok(raw)
 }
 
 fn from_reg_u16(raw: u16, scale: f32) -> f32 {
@@ -64,6 +68,9 @@ fn to_reg_u32(
         return Err(InputError::OutOfRange { field });
     }
     let raw = (scaled + 0.5) as u32;
+    if !range.contains(raw as f64 / scale) {
+        return Err(InputError::OutOfRange { field });
+    }
     Ok(RegisterWords {
         low: raw as u16,
         high: (raw >> 16) as u16,
@@ -527,18 +534,24 @@ impl<T: ModbusTransport> Xy<T> {
     /// Write all 14 registers of memory group `n` (0–9), then return the values
     /// stored by the device after temperature conversion and rounding.
     ///
-    /// For M0 this updates the live operating set. If V-SET must rise above the
-    /// current S-OVP, S-OVP is raised first because FC10 application order is
-    /// unverified and XY7025 latches OVP when V-SET exceeds the active limit.
+    /// For M0 this updates the live operating set. Valid V-SET/S-OVP crossings
+    /// are staged safely while the FC10 application order remains unverified.
     pub fn write_group(&mut self, n: u8, p: &GroupParams) -> Result<GroupParams, XyError> {
         validate_group(n)?;
-        let mut regs = encode_group(p, self.model, p.s_otp.unit)?;
+        let encoding = encode_group(p, self.model)?;
         let unit = self.read_temp_unit()?;
-        regs[12] = encode_group_otp(p.s_otp, unit)?;
+        let regs = encoding.for_unit(unit)?;
         if n == 0 {
-            let current_ovp = self.read_one(REG_S_OVP)?;
-            if regs[0] > current_ovp {
-                self.write_one(REG_S_OVP, regs[3])?;
+            const V_SET_OFFSET: usize = 0;
+            const S_OVP_OFFSET: usize = (REG_S_OVP - GROUP_BASE) as usize;
+            let mut current = [0u16; S_OVP_OFFSET + 1];
+            self.transport
+                .read_holding(self.slave, GROUP_BASE, &mut current)?;
+            if regs[V_SET_OFFSET] > current[S_OVP_OFFSET] {
+                self.write_one(REG_S_OVP, regs[S_OVP_OFFSET])?;
+            }
+            if regs[S_OVP_OFFSET] < current[V_SET_OFFSET] {
+                self.write_one(REG_V_SET, regs[V_SET_OFFSET])?;
             }
         }
         self.transport
@@ -602,11 +615,25 @@ fn decode_group(
     })
 }
 
-fn encode_group(
-    p: &GroupParams,
-    model: Model,
-    unit: TempUnit,
-) -> Result<[u16; GROUP_LEN as usize], InputError> {
+#[derive(Debug)]
+struct GroupEncoding {
+    values: [u16; GROUP_LEN as usize],
+    s_otp: Temperature,
+}
+
+impl GroupEncoding {
+    fn for_unit(mut self, unit: TempUnit) -> Result<[u16; GROUP_LEN as usize], InputError> {
+        self.values[12] = encode_group_otp(self.s_otp, unit)?;
+        Ok(self.values)
+    }
+}
+
+fn encode_group(p: &GroupParams, model: Model) -> Result<GroupEncoding, InputError> {
+    if !p.s_otp.value.is_finite() {
+        return Err(InputError::NonFinite {
+            field: InputField::OverTemperatureProtection,
+        });
+    }
     let i_scale = model.current_scale();
     let limits = model.limits();
     validate_u16_max(p.s_ohp_h, 99, InputField::OutputTimeHours)?;
@@ -666,13 +693,16 @@ fn encode_group(
         oah.high,
         owh.low,
         owh.high,
-        encode_group_otp(p.s_otp, unit)?,
+        0,
         p.power_on_output as u16,
     ];
     if values[0] > values[3] {
         return Err(InputError::VoltageSetpointAboveProtection);
     }
-    Ok(values)
+    Ok(GroupEncoding {
+        values,
+        s_otp: p.s_otp,
+    })
 }
 
 fn encode_group_otp(temperature: Temperature, unit: TempUnit) -> Result<u16, InputError> {

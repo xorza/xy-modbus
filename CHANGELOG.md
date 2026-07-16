@@ -81,6 +81,15 @@ repository has no branch named `main`.
 
 ### Fixed
 
+- Staged both upward and downward V-SET/S-OVP crossings before live M0 group
+  writes so unknown FC10 register application order cannot latch OVP.
+- Encoded group over-temperature thresholds only after reading the device's
+  active temperature unit, avoiding rejection against an unrelated source-unit
+  range.
+- Retried interrupted UART reads, writes, drains, and flushes in place so a
+  partial transaction is not abandoned or replayed from the beginning.
+- Rejected fixed-point writes whose rounded wire value falls outside a custom
+  model's declared physical range.
 - Restarted the complete pre-transmit quiet interval whenever draining observes
   RX activity, and report drain failures before writing a request.
 - Rejected non-finite, negative, out-of-model-range, and unrepresentable write
@@ -89,8 +98,6 @@ repository has no branch named `main`.
   protection writes.
 - Rejected invalid group hours/minutes and runtime minutes/seconds read from the
   device instead of returning malformed time values.
-- Guarded live M0 writes against the V-SET/S-OVP ordering hazard without
-  assuming that FC10 register application is atomic.
 - Preserved all `u32` register-pair values across decode/encode round trips by
   using `f64` for cumulative counters and group limits.
 - Recognized both documented XY7025-family model codes, `0x6100` and `0x6500`,

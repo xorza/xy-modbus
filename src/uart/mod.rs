@@ -129,6 +129,7 @@ fn drain_rx<U: BlockingRead>(uart: &mut U) -> Result<DrainOutcome, RtuError> {
             Ok(0) if drained == 0 => return Ok(DrainOutcome::Quiet),
             Ok(0) => return Ok(DrainOutcome::Activity),
             Ok(n) => drained += n,
+            Err(error) if is_interrupted(&error) => continue,
             Err(error) => return Err(io_error(IoOperation::Read, error)),
         }
     }
@@ -142,6 +143,10 @@ fn io_error<E: embedded_io::Error>(operation: IoOperation, error: E) -> RtuError
     }
 }
 
+fn is_interrupted<E: embedded_io::Error>(error: &E) -> bool {
+    error.kind() == embedded_io::ErrorKind::Interrupted
+}
+
 fn write_all<U: Write>(uart: &mut U, mut buf: &[u8]) -> Result<(), RtuError> {
     while !buf.is_empty() {
         match uart.write(buf) {
@@ -152,12 +157,17 @@ fn write_all<U: Write>(uart: &mut U, mut buf: &[u8]) -> Result<(), RtuError> {
                 });
             }
             Ok(n) => buf = &buf[n..],
+            Err(error) if is_interrupted(&error) => continue,
             Err(error) => return Err(io_error(IoOperation::Write, error)),
         }
     }
-    uart.flush()
-        .map_err(|error| io_error(IoOperation::Flush, error))?;
-    Ok(())
+    loop {
+        match uart.flush() {
+            Ok(()) => return Ok(()),
+            Err(error) if is_interrupted(&error) => continue,
+            Err(error) => return Err(io_error(IoOperation::Flush, error)),
+        }
+    }
 }
 
 /// Fill `buf` from the UART, treating "no bytes within
@@ -174,6 +184,7 @@ fn read_exact<U: BlockingRead>(
         match uart.read(&mut buf[filled..], read_timeout_ms) {
             Ok(0) => return Err(RtuError::Timeout),
             Ok(n) => filled += n,
+            Err(error) if is_interrupted(&error) => continue,
             Err(error) => return Err(io_error(IoOperation::Read, error)),
         }
     }

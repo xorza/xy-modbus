@@ -199,7 +199,7 @@ impl embedded_io::Write for FailingUart {
     }
     fn flush(&mut self) -> Result<(), Self::Error> {
         if self.fail_flush {
-            Err(embedded_io::ErrorKind::Interrupted)
+            Err(embedded_io::ErrorKind::BrokenPipe)
         } else {
             Ok(())
         }
@@ -297,9 +297,99 @@ fn flush_error_identifies_flush_operation() {
         t.write_single_holding(0x01, 0x0012, 0x0001).unwrap_err(),
         RtuError::Io {
             operation: IoOperation::Flush,
-            kind: IoErrorKind::Interrupted,
+            kind: IoErrorKind::BrokenPipe,
         }
     );
+}
+
+#[test]
+fn interrupted_io_retries_the_current_transaction() {
+    #[derive(Debug)]
+    struct InterruptingUart {
+        tx: Vec<u8>,
+        response: Vec<u8>,
+        response_pos: usize,
+        armed: bool,
+        drain_interrupted: bool,
+        response_interrupted: bool,
+        write_calls: u8,
+        flush_calls: u8,
+    }
+
+    impl ErrorType for InterruptingUart {
+        type Error = embedded_io::ErrorKind;
+    }
+
+    impl BlockingRead for InterruptingUart {
+        fn read(&mut self, buf: &mut [u8], _timeout_ms: u32) -> Result<usize, Self::Error> {
+            if !self.armed {
+                if !self.drain_interrupted {
+                    self.drain_interrupted = true;
+                    return Err(embedded_io::ErrorKind::Interrupted);
+                }
+                return Ok(0);
+            }
+            if !self.response_interrupted {
+                self.response_interrupted = true;
+                return Err(embedded_io::ErrorKind::Interrupted);
+            }
+            if buf.is_empty() || self.response_pos == self.response.len() {
+                return Ok(0);
+            }
+            buf[0] = self.response[self.response_pos];
+            self.response_pos += 1;
+            Ok(1)
+        }
+    }
+
+    impl embedded_io::Write for InterruptingUart {
+        fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            self.write_calls += 1;
+            if self.write_calls == 2 {
+                return Err(embedded_io::ErrorKind::Interrupted);
+            }
+            let written = buf.len().min(2);
+            self.tx.extend_from_slice(&buf[..written]);
+            self.armed = true;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            self.flush_calls += 1;
+            if self.flush_calls == 1 {
+                Err(embedded_io::ErrorKind::Interrupted)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    let response = frame_with_crc(std::vec![0x01, 0x03, 0x02, 0x00, 0x05]);
+    let uart = InterruptingUart {
+        tx: Vec::new(),
+        response,
+        response_pos: 0,
+        armed: false,
+        drain_interrupted: false,
+        response_interrupted: false,
+        write_calls: 0,
+        flush_calls: 0,
+    };
+    let mut transport = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    let mut out = [0u16; 1];
+    transport.read_holding(0x01, 0x0000, &mut out).unwrap();
+    assert_eq!(out, [5]);
+
+    let parts = transport.into_parts();
+    assert_eq!(
+        parts.uart.tx,
+        framing::build_read_request(0x01, 0x0000, 1).unwrap()
+    );
+    assert!(parts.uart.drain_interrupted);
+    assert!(parts.uart.response_interrupted);
+    assert_eq!(parts.uart.write_calls, 5);
+    assert_eq!(parts.uart.flush_calls, 2);
+    assert_eq!(parts.uart.response_pos, parts.uart.response.len());
 }
 
 #[test]

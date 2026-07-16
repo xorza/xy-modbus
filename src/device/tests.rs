@@ -469,9 +469,25 @@ fn write_group_round_trips_through_encode() {
     );
 
     let mut invalid = p;
-    invalid.s_otp.value = 110.1;
+    invalid.s_otp.value = f32::NAN;
     assert_eq!(
         xy.write_group(2, &invalid),
+        Err(XyError::Input(InputError::NonFinite {
+            field: InputField::OverTemperatureProtection
+        }))
+    );
+
+    let mut invalid = p;
+    invalid.s_otp.value = 110.1;
+    let mut invalid_xy = Xy::new(
+        MockTransport::new(vec![Op::Read {
+            addr: REG_TEMP_UNIT,
+            values: vec![0],
+        }]),
+        Model::Xy7025,
+    );
+    assert_eq!(
+        invalid_xy.write_group(2, &invalid),
         Err(XyError::Input(InputError::OutOfRange {
             field: InputField::OverTemperatureProtection
         }))
@@ -486,53 +502,114 @@ fn write_group_round_trips_through_encode() {
 }
 
 #[test]
-fn live_group_raises_ovp_before_voltage_setpoint() {
-    let p = GroupParams {
-        setpoints: Setpoints {
-            v_set: 14.40,
-            i_set: 10.00,
+fn live_group_stages_both_protection_crossing_directions() {
+    #[derive(Copy, Clone, Debug)]
+    struct StageWrite {
+        addr: u16,
+        value: u16,
+    }
+
+    #[derive(Debug)]
+    struct Case {
+        current: [u16; 4],
+        target_v_set: u16,
+        target_ovp: u16,
+        stages: &'static [StageWrite],
+    }
+
+    let cases = [
+        Case {
+            current: [1200, 1000, 1000, 1300],
+            target_v_set: 1440,
+            target_ovp: 1500,
+            stages: &[StageWrite {
+                addr: REG_S_OVP,
+                value: 1500,
+            }],
         },
-        safety_limits: SafetyLimits {
-            lvp_v: 10.00,
-            ovp_v: 15.00,
-            ocp_a: 12.50,
+        Case {
+            current: [1600, 1000, 1000, 1700],
+            target_v_set: 1400,
+            target_ovp: 1500,
+            stages: &[StageWrite {
+                addr: REG_V_SET,
+                value: 1400,
+            }],
         },
-        s_opp_w: 1800.0,
-        s_ohp_h: 0,
-        s_ohp_m: 0,
-        s_oah_ah: 0.0,
-        s_owh_wh: 0.0,
-        s_otp: Temperature {
-            value: 95.0,
-            unit: TempUnit::Celsius,
+        Case {
+            current: [1400, 1000, 1000, 1500],
+            target_v_set: 1440,
+            target_ovp: 1500,
+            stages: &[],
         },
-        power_on_output: false,
-    };
-    let values = vec![1440, 1000, 1000, 1500, 1250, 1800, 0, 0, 0, 0, 0, 0, 95, 0];
-    let mock = MockTransport::new(vec![
-        Op::Read {
-            addr: REG_TEMP_UNIT,
-            values: vec![0],
-        },
-        Op::Read {
-            addr: REG_S_OVP,
-            values: vec![1300],
-        },
-        Op::WriteOne {
-            addr: REG_S_OVP,
-            value: 1500,
-        },
-        Op::WriteMany {
+    ];
+
+    for case in cases {
+        let p = GroupParams {
+            setpoints: Setpoints {
+                v_set: case.target_v_set as f32 / 100.0,
+                i_set: 10.00,
+            },
+            safety_limits: SafetyLimits {
+                lvp_v: 10.00,
+                ovp_v: case.target_ovp as f32 / 100.0,
+                ocp_a: 12.50,
+            },
+            s_opp_w: 1800.0,
+            s_ohp_h: 0,
+            s_ohp_m: 0,
+            s_oah_ah: 0.0,
+            s_owh_wh: 0.0,
+            s_otp: Temperature {
+                value: 95.0,
+                unit: TempUnit::Celsius,
+            },
+            power_on_output: false,
+        };
+        let values = vec![
+            case.target_v_set,
+            1000,
+            1000,
+            case.target_ovp,
+            1250,
+            1800,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            95,
+            0,
+        ];
+        let mut script = vec![
+            Op::Read {
+                addr: REG_TEMP_UNIT,
+                values: vec![0],
+            },
+            Op::Read {
+                addr: GROUP_BASE,
+                values: case.current.to_vec(),
+            },
+        ];
+        for stage in case.stages {
+            script.push(Op::WriteOne {
+                addr: stage.addr,
+                value: stage.value,
+            });
+        }
+        script.push(Op::WriteMany {
             addr: group_addr(0),
             values: values.clone(),
-        },
-        Op::Read {
+        });
+        script.push(Op::Read {
             addr: group_addr(0),
             values,
-        },
-    ]);
-    let mut xy = Xy::new(mock, Model::Xy7025);
-    assert_eq!(xy.write_group(0, &p).unwrap(), p);
+        });
+
+        let mut xy = Xy::new(MockTransport::new(script), Model::Xy7025);
+        assert_eq!(xy.write_group(0, &p).unwrap(), p, "{case:?}");
+    }
 }
 
 #[test]
@@ -581,7 +658,10 @@ fn group_encode_decode_round_trip() {
         },
         power_on_output: true,
     };
-    let regs = encode_group(&p, Model::Xy7025, TempUnit::Celsius).unwrap();
+    let regs = encode_group(&p, Model::Xy7025)
+        .unwrap()
+        .for_unit(TempUnit::Celsius)
+        .unwrap();
     // Pin the encoded oah/owh register pair layout (low, high).
     assert_eq!(regs[8..12], [500, 2, 12_345, 0]);
     let decoded = decode_group(&regs, Model::Xy7025, group_addr(0), TempUnit::Celsius).unwrap();
@@ -595,7 +675,10 @@ fn group_encode_decode_round_trip() {
     assert_eq!(decoded.s_otp, p.s_otp);
     assert_eq!(decoded.power_on_output, p.power_on_output);
 
-    let fahrenheit_regs = encode_group(&p, Model::Xy7025, TempUnit::Fahrenheit).unwrap();
+    let fahrenheit_regs = encode_group(&p, Model::Xy7025)
+        .unwrap()
+        .for_unit(TempUnit::Fahrenheit)
+        .unwrap();
     assert_eq!(fahrenheit_regs[12], 203);
     assert_ne!(fahrenheit_regs[12], regs[12]);
 
@@ -605,12 +688,35 @@ fn group_encode_decode_round_trip() {
         unit: TempUnit::Fahrenheit,
     };
     assert_eq!(
-        encode_group(&fahrenheit_limit, Model::Xy7025, TempUnit::Celsius).unwrap()[12],
+        encode_group(&fahrenheit_limit, Model::Xy7025)
+            .unwrap()
+            .for_unit(TempUnit::Celsius)
+            .unwrap()[12],
         110
     );
     fahrenheit_limit.s_otp.value = 230.1;
     assert_eq!(
-        encode_group(&fahrenheit_limit, Model::Xy7025, TempUnit::Fahrenheit),
+        encode_group(&fahrenheit_limit, Model::Xy7025)
+            .unwrap()
+            .for_unit(TempUnit::Fahrenheit),
+        Err(InputError::OutOfRange {
+            field: InputField::OverTemperatureProtection
+        })
+    );
+
+    let mut source_unit_outlier = p;
+    source_unit_outlier.s_otp.value = -1.0;
+    assert_eq!(
+        encode_group(&source_unit_outlier, Model::Xy7025)
+            .unwrap()
+            .for_unit(TempUnit::Fahrenheit)
+            .unwrap()[12],
+        30
+    );
+    assert_eq!(
+        encode_group(&source_unit_outlier, Model::Xy7025)
+            .unwrap()
+            .for_unit(TempUnit::Celsius),
         Err(InputError::OutOfRange {
             field: InputField::OverTemperatureProtection
         })
@@ -1062,7 +1168,7 @@ fn invalid_inputs_fail_before_transport_io() {
 }
 
 #[test]
-fn paired_register_conversions_round_trip_every_precision_boundary() {
+fn register_conversions_preserve_precision_and_model_ranges() {
     for scale in [100.0, 1000.0] {
         for raw in [0, 1, 16_777_217, 420_000_001, u32::MAX] {
             let value = from_reg_u32(raw as u16, (raw >> 16) as u16, scale);
@@ -1080,6 +1186,47 @@ fn paired_register_conversions_round_trip_every_precision_boundary() {
             assert_eq!(round_trip, raw, "scale={scale}, raw={raw}");
         }
     }
+
+    let upper_non_grid = ModelRange {
+        min: 0.0,
+        max: 0.0078125,
+    };
+    // 0.0078125 * 100 rounds to raw 1, which represents 0.01 > max.
+    assert_eq!(
+        to_reg_u16(
+            0.0078125,
+            100.0,
+            upper_non_grid,
+            InputField::VoltageSetpoint,
+        ),
+        Err(InputError::OutOfRange {
+            field: InputField::VoltageSetpoint
+        })
+    );
+    assert!(matches!(
+        to_reg_u32(0.0078125, 100.0, upper_non_grid, InputField::EnergyLimit,),
+        Err(InputError::OutOfRange {
+            field: InputField::EnergyLimit
+        })
+    ));
+
+    let lower_non_grid = ModelRange {
+        min: 0.004,
+        max: 1.0,
+    };
+    // 0.004 * 100 rounds to raw 0, which represents 0.0 < min.
+    assert_eq!(
+        to_reg_u16(0.004, 100.0, lower_non_grid, InputField::VoltageSetpoint,),
+        Err(InputError::OutOfRange {
+            field: InputField::VoltageSetpoint
+        })
+    );
+    assert!(matches!(
+        to_reg_u32(0.004, 100.0, lower_non_grid, InputField::EnergyLimit,),
+        Err(InputError::OutOfRange {
+            field: InputField::EnergyLimit
+        })
+    ));
 }
 
 #[test]
