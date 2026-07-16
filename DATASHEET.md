@@ -240,6 +240,9 @@ and the power-on-output behavior.
 > The high-level `write_group` API converts its unit-tagged threshold to the
 > active `F-C` unit, rejects values above that limit, and returns the stored
 > group readback so callers observe any firmware rounding.
+> Group reads and writes use multiple Modbus transactions. Do not change `F-C`
+> concurrently through another controller or the front panel while either
+> operation is in progress.
 
 ### 3.5 Memory groups M0–M9 (`0x0050 + N × 0x0010`)
 

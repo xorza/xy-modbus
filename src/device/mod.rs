@@ -518,6 +518,9 @@ impl<T: ModbusTransport> Xy<T> {
     }
 
     /// Read all 14 registers of memory group `n` (0–9).
+    ///
+    /// F-C must not be changed concurrently through another controller or the
+    /// front panel while this operation is in progress.
     pub fn read_group(&mut self, n: u8) -> Result<GroupParams, XyError> {
         validate_group(n)?;
         let unit = self.read_temp_unit()?;
@@ -536,6 +539,8 @@ impl<T: ModbusTransport> Xy<T> {
     ///
     /// For M0 this updates the live operating set. Valid V-SET/S-OVP crossings
     /// are staged safely while the FC10 application order remains unverified.
+    /// F-C must not be changed concurrently through another controller or the
+    /// front panel while this operation is in progress.
     pub fn write_group(&mut self, n: u8, p: &GroupParams) -> Result<GroupParams, XyError> {
         validate_group(n)?;
         let encoding = encode_group(p, self.model)?;
