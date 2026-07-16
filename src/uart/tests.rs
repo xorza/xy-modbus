@@ -80,6 +80,42 @@ impl DelayNs for NoDelay {
     fn delay_ns(&mut self, _: u32) {}
 }
 
+fn timing(read_timeout_ms: u32, inter_frame_ms: u32, quiet_attempts: u32) -> UartTiming {
+    UartTiming::new(read_timeout_ms, inter_frame_ms, quiet_attempts).unwrap()
+}
+
+#[test]
+fn timing_rejects_each_zero_parameter() {
+    let cases = [
+        (
+            UartTiming::new(0, 50, 10),
+            UartTimingError::ZeroReadTimeout,
+            "UART read timeout must be nonzero",
+        ),
+        (
+            UartTiming::new(500, 0, 10),
+            UartTimingError::ZeroInterFrameGap,
+            "UART inter-frame gap must be nonzero",
+        ),
+        (
+            UartTiming::new(500, 50, 0),
+            UartTimingError::ZeroQuietAttempts,
+            "UART quiet-attempt count must be nonzero",
+        ),
+    ];
+    for (result, expected, display) in cases {
+        let error = result.unwrap_err();
+        assert_eq!(error, expected);
+        assert_eq!(std::format!("{error}"), display);
+    }
+
+    assert_eq!(UartTiming::default(), UartTiming::DEFAULT);
+    let minimum = timing(1, 1, 1);
+    assert_eq!(minimum.read_timeout_ms, 1);
+    assert_eq!(minimum.inter_frame_ms, 1);
+    assert_eq!(minimum.quiet_attempts, 1);
+}
+
 fn frame_with_crc(mut bytes: Vec<u8>) -> Vec<u8> {
     let crc = crc16_modbus(&bytes);
     bytes.push(crc as u8);
@@ -92,7 +128,7 @@ fn read_holding_round_trip() {
     // Slave 1 read 3 regs at 0x0000 → returns [10, 20, 30].
     let resp = frame_with_crc(std::vec![0x01, 0x03, 0x06, 0, 10, 0, 20, 0, 30]);
     let uart = MockUart::new(resp);
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
 
     let mut out = [0u16; 3];
     t.read_holding(0x01, 0x0000, &mut out).unwrap();
@@ -109,7 +145,7 @@ fn write_single_round_trip() {
     // Echo response.
     let req = framing::build_write_single_request(0x01, 0x0012, 0x0001);
     let uart = MockUart::new(req.to_vec());
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     t.write_single_holding(0x01, 0x0012, 0x0001).unwrap();
 }
 
@@ -117,7 +153,7 @@ fn write_single_round_trip() {
 fn write_multiple_round_trip() {
     let resp = frame_with_crc(std::vec![0x01, 0x10, 0x00, 0x52, 0x00, 0x03]);
     let uart = MockUart::new(resp);
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     t.write_multiple_holdings(0x01, 0x0052, &[1000, 1500, 1250])
         .unwrap();
 }
@@ -126,7 +162,7 @@ fn write_multiple_round_trip() {
 fn exception_response_propagates() {
     let frame = frame_with_crc(std::vec![0x01, 0x83, 0x02]);
     let uart = MockUart::new(frame);
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     let mut out = [0u16; 1];
     let err = t.read_holding(0x01, 0x0000, &mut out).unwrap_err();
     assert_eq!(err, RtuError::Modbus(ModbusError::Exception(0x02)));
@@ -135,7 +171,7 @@ fn exception_response_propagates() {
 #[test]
 fn timeout_when_no_data() {
     let uart = MockUart::new(Vec::new());
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(3, 0);
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(3, 1, 10));
     let mut out = [0u16; 1];
     assert_eq!(
         t.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
@@ -214,7 +250,7 @@ fn bad_crc_propagates() {
     frame.push((crc as u8) ^ 0xFF);
     frame.push((crc >> 8) as u8);
     let uart = MockUart::new(frame);
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     let mut out = [0u16; 3];
     assert_eq!(
         t.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
@@ -227,7 +263,7 @@ fn wrong_slave_in_response_propagates() {
     // Slave field = 0x02 but request was for 0x01.
     let frame = frame_with_crc(std::vec![0x02, 0x03, 0x02, 0x00, 0x05]);
     let uart = MockUart::new(frame);
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     let mut out = [0u16; 1];
     assert_eq!(
         t.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
@@ -247,7 +283,7 @@ fn write_returning_zero_is_io_error() {
         resp_pos: 0,
         armed: false,
     };
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     let mut out = [0u16; 1];
     assert_eq!(
         t.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
@@ -270,7 +306,7 @@ fn write_error_is_io_error() {
         resp_pos: 0,
         armed: false,
     };
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     assert_eq!(
         t.write_single_holding(0x01, 0x0012, 0x0001).unwrap_err(),
         RtuError::Io {
@@ -292,7 +328,7 @@ fn flush_error_identifies_flush_operation() {
         resp_pos: 0,
         armed: false,
     };
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     assert_eq!(
         t.write_single_holding(0x01, 0x0012, 0x0001).unwrap_err(),
         RtuError::Io {
@@ -375,7 +411,7 @@ fn interrupted_io_retries_the_current_transaction() {
         write_calls: 0,
         flush_calls: 0,
     };
-    let mut transport = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    let mut transport = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     let mut out = [0u16; 1];
     transport.read_holding(0x01, 0x0000, &mut out).unwrap();
     assert_eq!(out, [5]);
@@ -405,7 +441,7 @@ fn read_error_mid_frame_is_io_error() {
         resp_pos: 0,
         armed: false,
     };
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     let mut out = [0u16; 1];
     assert_eq!(
         t.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
@@ -423,11 +459,61 @@ fn pre_tx_activity_restarts_the_full_inter_frame_gap() {
     for (stale, expected_delay_ms) in cases {
         let uart = MockUart::new(response.clone()).with_stale(stale);
         let mut transport =
-            UartTransport::new(uart, CountingDelay { total_ms: 0 }).with_timing(50, 7);
+            UartTransport::new(uart, CountingDelay { total_ms: 0 }).with_timing(timing(50, 7, 10));
         let mut out = [0u16; 1];
         transport.read_holding(0x01, 0x0000, &mut out).unwrap();
         assert_eq!(transport.into_parts().delay.total_ms, expected_delay_ms);
     }
+}
+
+#[test]
+fn continuous_rx_returns_bus_busy_without_transmitting() {
+    #[derive(Debug)]
+    struct ActiveUart {
+        read_calls: usize,
+        write_calls: usize,
+    }
+
+    impl ErrorType for ActiveUart {
+        type Error = core::convert::Infallible;
+    }
+
+    impl BlockingRead for ActiveUart {
+        fn read(&mut self, buf: &mut [u8], _timeout_ms: u32) -> Result<usize, Self::Error> {
+            self.read_calls += 1;
+            buf.fill(0xAA);
+            Ok(buf.len())
+        }
+    }
+
+    impl embedded_io::Write for ActiveUart {
+        fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            self.write_calls += 1;
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    let uart = ActiveUart {
+        read_calls: 0,
+        write_calls: 0,
+    };
+    let mut transport =
+        UartTransport::new(uart, CountingDelay { total_ms: 0 }).with_timing(timing(50, 7, 3));
+    let mut out = [0u16; 1];
+    assert_eq!(
+        transport.read_holding(0x01, 0x0000, &mut out),
+        Err(RtuError::BusBusy)
+    );
+
+    let parts = transport.into_parts();
+    assert_eq!(parts.delay.total_ms, 21);
+    assert_eq!(parts.uart.read_calls, 3 * 4 * MAX_ADU / 32);
+    assert_eq!(parts.uart.write_calls, 0);
+    assert_eq!(out, [0]);
 }
 
 #[test]
@@ -442,7 +528,8 @@ fn pre_tx_drain_error_is_reported_before_write() {
         resp_pos: 0,
         armed: false,
     };
-    let mut transport = UartTransport::new(uart, CountingDelay { total_ms: 0 }).with_timing(50, 7);
+    let mut transport =
+        UartTransport::new(uart, CountingDelay { total_ms: 0 }).with_timing(timing(50, 7, 10));
     let mut out = [0u16; 1];
     assert_eq!(
         transport.read_holding(0x01, 0x0000, &mut out),
@@ -460,7 +547,7 @@ fn pre_tx_drain_error_is_reported_before_write() {
 #[should_panic(expected = "broadcast")]
 fn slave_zero_panics_on_read() {
     let uart = MockUart::new(Vec::new());
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     let mut out = [0u16; 1];
     let _ = t.read_holding(0x00, 0x0000, &mut out);
 }
@@ -468,7 +555,7 @@ fn slave_zero_panics_on_read() {
 #[test]
 fn broadcast_writes_transmit_without_waiting_for_response() {
     let uart = MockUart::new(Vec::new());
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     t.write_single_holding(0, 0x0012, 1).unwrap();
     t.write_multiple_holdings(0, 0x0052, &[1000, 1500, 1250])
         .unwrap();
@@ -522,7 +609,7 @@ fn read_exact_aggregates_byte_at_a_time() {
         pos: 0,
         armed: false,
     };
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     let mut out = [0u16; 3];
     t.read_holding(0x01, 0x0000, &mut out).unwrap();
     assert_eq!(out, [10, 20, 30]);
@@ -536,7 +623,7 @@ fn exception_short_circuits_read() {
     let frame = frame_with_crc(std::vec![0x01, 0x83, 0x02]);
     let uart = MockUart::new(frame);
     // Request 3 regs (would expect 11 bytes) but server returns 5-byte exception.
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(10, 0);
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(10, 1, 10));
     let mut out = [0u16; 3];
     assert_eq!(
         t.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
@@ -548,7 +635,7 @@ fn exception_short_circuits_read() {
 fn malformed_complete_responses_return_header_errors_without_timeout() {
     let frame = frame_with_crc(std::vec![0x01, 0x03, 0x02, 0x00, 0x05]);
     let uart = MockUart::new(frame);
-    let mut transport = UartTransport::new(uart, NoDelay).with_timing(10, 0);
+    let mut transport = UartTransport::new(uart, NoDelay).with_timing(timing(10, 1, 10));
     let mut out = [0u16; MAX_READ_REGS];
     assert_eq!(
         transport.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
@@ -557,7 +644,7 @@ fn malformed_complete_responses_return_header_errors_without_timeout() {
 
     let frame = frame_with_crc(std::vec![0x01, 0x03, 0x02, 0x00, 0x05]);
     let uart = MockUart::new(frame);
-    let mut transport = UartTransport::new(uart, NoDelay).with_timing(10, 0);
+    let mut transport = UartTransport::new(uart, NoDelay).with_timing(timing(10, 1, 10));
     assert_eq!(
         transport.write_single_holding(0x01, 0x0012, 1).unwrap_err(),
         RtuError::Modbus(ModbusError::BadHeader)
@@ -567,7 +654,7 @@ fn malformed_complete_responses_return_header_errors_without_timeout() {
 #[test]
 fn invalid_quantities_fail_before_uart_io() {
     let uart = MockUart::new(Vec::new());
-    let mut transport = UartTransport::new(uart, NoDelay).with_timing(10, 0);
+    let mut transport = UartTransport::new(uart, NoDelay).with_timing(timing(10, 1, 10));
 
     let mut empty = [];
     assert_eq!(
@@ -594,7 +681,7 @@ fn invalid_quantities_fail_before_uart_io() {
 #[test]
 fn into_parts_returns_inner_uart_and_delay() {
     let uart = MockUart::new(Vec::new());
-    let t = UartTransport::new(uart, NoDelay).with_timing(123, 7);
+    let t = UartTransport::new(uart, NoDelay).with_timing(timing(123, 7, 10));
     let uart = t.into_parts().uart;
     // Sanity: tx buffer is empty, no traffic happened.
     assert!(uart.tx.is_empty());
@@ -606,7 +693,7 @@ fn pre_existing_rx_is_drained() {
     // followed by the real response.
     let response = frame_with_crc(std::vec![0x01, 0x03, 0x02, 0x00, 0x05]);
     let uart = MockUart::new(response).with_stale(std::vec![0xAA, 0xBB, 0xCC]);
-    let mut t = UartTransport::new(uart, NoDelay).with_timing(50, 0);
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     let mut out = [0u16; 1];
     t.read_holding(0x01, 0x0000, &mut out).unwrap();
     assert_eq!(out, [5]);

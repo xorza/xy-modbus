@@ -13,8 +13,9 @@
 //! let mut xy = Xy::new(transport, Model::Xy7025);
 //! ```
 //!
-//! Timing defaults use a 500 ms per-read inactivity timeout and a 50 ms
-//! inter-frame gap. Override with [`UartTransport::with_timing`].
+//! Timing defaults use a 500 ms per-read inactivity timeout, a 50 ms
+//! inter-frame gap, and up to ten quiet-bus acquisition attempts. Override
+//! them with [`UartTransport::with_timing`] and [`UartTiming`].
 //! Write requests to slave `0` use standard Modbus broadcast semantics: the
 //! frame is flushed and the call returns without waiting for a response.
 
@@ -41,6 +42,83 @@ pub trait BlockingRead: embedded_io::ErrorType {
     fn read(&mut self, buf: &mut [u8], timeout_ms: u32) -> Result<usize, Self::Error>;
 }
 
+/// Validated UART transaction timing.
+///
+/// `quiet_attempts` bounds how many complete inter-frame gaps may still end in
+/// RX activity before a transaction returns [`RtuError::BusBusy`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct UartTiming {
+    read_timeout_ms: u32,
+    inter_frame_ms: u32,
+    quiet_attempts: u32,
+}
+
+impl UartTiming {
+    /// XY-series timing used by [`UartTransport::new`].
+    pub const DEFAULT: Self = Self {
+        read_timeout_ms: 500,
+        inter_frame_ms: 50,
+        quiet_attempts: 10,
+    };
+
+    /// Build a timing configuration whose values are all nonzero.
+    ///
+    /// `read_timeout_ms` is the inactivity timeout for each partial response
+    /// read. `inter_frame_ms` is the required quiet interval before a request.
+    /// `quiet_attempts` bounds how many such intervals may end in RX activity.
+    pub const fn new(
+        read_timeout_ms: u32,
+        inter_frame_ms: u32,
+        quiet_attempts: u32,
+    ) -> Result<Self, UartTimingError> {
+        if read_timeout_ms == 0 {
+            return Err(UartTimingError::ZeroReadTimeout);
+        }
+        if inter_frame_ms == 0 {
+            return Err(UartTimingError::ZeroInterFrameGap);
+        }
+        if quiet_attempts == 0 {
+            return Err(UartTimingError::ZeroQuietAttempts);
+        }
+        Ok(Self {
+            read_timeout_ms,
+            inter_frame_ms,
+            quiet_attempts,
+        })
+    }
+}
+
+impl Default for UartTiming {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Invalid [`UartTiming`] parameter.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum UartTimingError {
+    /// The per-read response timeout was zero.
+    ZeroReadTimeout,
+    /// The required pre-transmit quiet interval was zero.
+    ZeroInterFrameGap,
+    /// The quiet-bus acquisition attempt budget was zero.
+    ZeroQuietAttempts,
+}
+
+impl core::fmt::Display for UartTimingError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::ZeroReadTimeout => "UART read timeout must be nonzero",
+            Self::ZeroInterFrameGap => "UART inter-frame gap must be nonzero",
+            Self::ZeroQuietAttempts => "UART quiet-attempt count must be nonzero",
+        })
+    }
+}
+
+impl core::error::Error for UartTimingError {}
+
 /// Values recovered from [`UartTransport::into_parts`].
 #[derive(Debug)]
 pub struct UartParts<U, D> {
@@ -58,8 +136,7 @@ pub struct UartParts<U, D> {
 pub struct UartTransport<U, D> {
     uart: U,
     delay: D,
-    read_timeout_ms: u32,
-    inter_frame_ms: u32,
+    timing: UartTiming,
     buf: [u8; MAX_ADU],
 }
 
@@ -68,22 +145,20 @@ where
     U: BlockingRead + Write,
     D: DelayNs,
 {
-    /// Build a transport with a 500 ms per-read inactivity timeout and
-    /// 50 ms inter-frame quiet gap.
+    /// Build a transport with a 500 ms per-read inactivity timeout, a 50 ms
+    /// inter-frame quiet gap, and ten quiet-bus acquisition attempts.
     pub fn new(uart: U, delay: D) -> Self {
         Self {
             uart,
             delay,
-            read_timeout_ms: 500,
-            inter_frame_ms: 50,
+            timing: UartTiming::DEFAULT,
             buf: [0u8; MAX_ADU],
         }
     }
 
-    /// Override the per-read inactivity timeout and inter-frame quiet gap.
-    pub fn with_timing(mut self, read_timeout_ms: u32, inter_frame_ms: u32) -> Self {
-        self.read_timeout_ms = read_timeout_ms;
-        self.inter_frame_ms = inter_frame_ms;
+    /// Override the transaction timing with a validated configuration.
+    pub fn with_timing(mut self, timing: UartTiming) -> Self {
+        self.timing = timing;
         self
     }
 
@@ -97,12 +172,13 @@ where
 
     /// Enforce ≥t3.5 bus silence before the next master frame.
     fn pre_tx_silence(&mut self) -> Result<(), RtuError> {
-        loop {
-            self.delay.delay_ms(self.inter_frame_ms);
+        for _ in 0..self.timing.quiet_attempts {
+            self.delay.delay_ms(self.timing.inter_frame_ms);
             if drain_rx(&mut self.uart)? == DrainOutcome::Quiet {
                 return Ok(());
             }
         }
+        Err(RtuError::BusBusy)
     }
 }
 
@@ -230,7 +306,7 @@ where
             ResponseShape::ReadHolding {
                 register_count: dst.len(),
             },
-            self.read_timeout_ms,
+            self.timing.read_timeout_ms,
         )?;
         framing::parse_read_response(resp, slave, dst)?;
         Ok(())
@@ -250,7 +326,7 @@ where
             &mut self.buf,
             slave,
             ResponseShape::WriteSingle,
-            self.read_timeout_ms,
+            self.timing.read_timeout_ms,
         )?;
         framing::parse_write_single_response(resp, &req)?;
         Ok(())
@@ -282,7 +358,7 @@ where
             &mut self.buf,
             slave,
             ResponseShape::WriteMultiple,
-            self.read_timeout_ms,
+            self.timing.read_timeout_ms,
         )?;
         framing::parse_write_multiple_response(resp, slave, addr, values.len() as u16)?;
         Ok(())

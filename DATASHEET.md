@@ -99,6 +99,7 @@ testing of the XY7025 and the bundled transport (`src/uart/mod.rs`):
 | -------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Min inter-frame gap  | ~50 ms           | Tighter and the device drops back-to-back frames; confirmed by [Jens's header](https://github.com/xorza/xy-modbus/blob/master/docs-archive/jens3382-xy6020l.h#L148)                                                                         |
 | Response timeout     | ~500 ms          | Worst case observed on XY7025; 200 ms is unreliable. [Jens's XY6020L library](https://github.com/xorza/xy-modbus/blob/master/docs-archive/jens3382-xy6020l.cpp) runs tighter (~40 ms) — XY7025 firmware appears to be the slower of the two |
+| Quiet-bus acquisition | ≤500 ms default | The bundled transport tries at most ten 50 ms quiet intervals, then returns `RtuError::BusBusy` without transmitting                                                                         |
 | Post-write quiet gap | ~10 ms           | Required before a follow-up read of the same reg                                                                                                                                             |
 | Cold-boot UART ready | ~1–2 s after Vin | Slower without USB-CDC enumeration delay to mask                                                                                                                                             |
 

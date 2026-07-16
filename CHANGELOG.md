@@ -62,6 +62,9 @@ repository has no branch named `main`.
   response that Modbus explicitly omits.
 - **Breaking:** `UartTransport::release` was replaced by `into_parts`, returning
   the named `UartParts` struct. `BlockingRead` now lives with the UART transport.
+- **Breaking:** `UartTransport::with_timing` now accepts a validated
+  `UartTiming`; its nonzero quiet-attempt budget bounds bus acquisition, and
+  `RtuError::BusBusy` reports exhaustion before transmission.
 - Consolidated the public surface in `lib.rs`, narrowed internal visibility, and
   removed internal re-export hubs, duplicate protocol-layer aliases, unused
   register constants, dead-code suppression, tuple returns, and trivial helpers.
@@ -91,7 +94,8 @@ repository has no branch named `main`.
 - Rejected fixed-point writes whose rounded wire value falls outside a custom
   model's declared physical range.
 - Restarted the complete pre-transmit quiet interval whenever draining observes
-  RX activity, and report drain failures before writing a request.
+  RX activity, bounded acquisition with a typed busy error, and reported drain
+  failures before writing a request.
 - Rejected non-finite, negative, out-of-model-range, and unrepresentable write
   values instead of silently clamping or normalizing them.
 - Enforced the documented XY7025 LVP minimum of 10 V for standalone and group

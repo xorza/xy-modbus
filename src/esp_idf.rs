@@ -40,7 +40,10 @@ impl<'d> Xy<EspIdfTransport<'d>> {
     /// non-default timing, build the transport manually:
     ///
     /// ```ignore
-    /// let transport = UartTransport::new(uart, FreeRtos).with_timing(750, 100);
+    /// use xy_modbus::uart::{UartTiming, UartTransport};
+    ///
+    /// let timing = UartTiming::new(750, 100, 10).unwrap();
+    /// let transport = UartTransport::new(uart, FreeRtos).with_timing(timing);
     /// let xy = Xy::new(transport, Model::Xy7025);
     /// ```
     pub fn from_esp_uart(uart: UartDriver<'d>, model: Model) -> Self {
