@@ -6,9 +6,9 @@
 //! [`UartTransport`] so callers don't write any glue:
 //!
 //! ```ignore
-//! use xy_modbus::{Model, Xy};
+//! use xy_modbus::Xy;
 //!
-//! let mut xy = Xy::from_esp_uart(uart, Model::Xy7025);
+//! let mut xy = Xy::from_esp_uart(uart);
 //! xy.set_protection(safety)?;
 //! xy.set_voltage(13.5)?;
 //! xy.set_output(true)?;
@@ -21,7 +21,6 @@ use esp_idf_hal::io::EspIOError;
 use esp_idf_hal::uart::UartDriver;
 
 use crate::device::Xy;
-use crate::types::model::Model;
 use crate::uart::{BlockingRead, UartTransport};
 
 impl BlockingRead for UartDriver<'_> {
@@ -44,9 +43,9 @@ impl<'d> Xy<EspIdfTransport<'d>> {
     ///
     /// let timing = UartTiming::new(750, 100, 10).unwrap();
     /// let transport = UartTransport::new(uart, FreeRtos).with_timing(timing);
-    /// let xy = Xy::new(transport, Model::Xy7025);
+    /// let xy = Xy::new(transport);
     /// ```
-    pub fn from_esp_uart(uart: UartDriver<'d>, model: Model) -> Self {
-        Self::new(UartTransport::new(uart, FreeRtos), model)
+    pub fn from_esp_uart(uart: UartDriver<'d>) -> Self {
+        Self::new(UartTransport::new(uart, FreeRtos))
     }
 }

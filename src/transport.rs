@@ -96,6 +96,8 @@ impl From<embedded_io::ErrorKind> for IoErrorKind {
 pub enum RtuError {
     /// Caller requested zero registers or exceeded the function-code limit.
     InvalidQuantity(usize),
+    /// Slave address was invalid for the requested Modbus operation.
+    InvalidSlaveAddress(u8),
     /// RX activity prevented acquisition of a complete pre-transmit quiet gap.
     BusBusy,
     /// No (or insufficient) bytes received within the response window.
@@ -114,6 +116,9 @@ impl fmt::Display for RtuError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidQuantity(n) => write!(f, "invalid register quantity {n}"),
+            Self::InvalidSlaveAddress(address) => {
+                write!(f, "invalid Modbus slave address {address}")
+            }
             Self::BusBusy => f.write_str("UART bus did not become quiet"),
             Self::Timeout => f.write_str("UART response timed out"),
             Self::Io { operation, kind } => write!(f, "UART {operation} error ({kind})"),
@@ -161,6 +166,8 @@ impl core::error::Error for RtuError {
 /// read destination is empty or exceeds [`crate::framing::MAX_READ_REGS`], or
 /// when a multi-write source is empty or exceeds
 /// [`crate::framing::MAX_WRITE_REGS`].
+/// Implementations must return [`RtuError::InvalidSlaveAddress`] before I/O for
+/// read addresses outside `1..=247` and write addresses outside `0..=247`.
 pub trait ModbusTransport {
     /// Read `dst.len()` holding registers from a unicast slave.
     fn read_holding(&mut self, slave: u8, addr: u16, dst: &mut [u16]) -> Result<(), RtuError>;
@@ -196,6 +203,10 @@ mod tests {
         );
         assert_eq!(format!("{}", RtuError::Timeout), "UART response timed out");
         assert_eq!(
+            format!("{}", RtuError::InvalidSlaveAddress(248)),
+            "invalid Modbus slave address 248"
+        );
+        assert_eq!(
             format!(
                 "{}",
                 RtuError::Io {
@@ -223,6 +234,7 @@ mod tests {
         let e = RtuError::Modbus(ModbusError::BadCrc);
         assert!(e.source().is_some());
         assert!(RtuError::InvalidQuantity(0).source().is_none());
+        assert!(RtuError::InvalidSlaveAddress(248).source().is_none());
         assert!(RtuError::BusBusy.source().is_none());
         assert!(RtuError::Timeout.source().is_none());
         assert!(

@@ -24,12 +24,11 @@ use esp_idf_hal::uart::config::Config;
 use esp_idf_hal::units::Hertz;
 
 use xy_modbus::{
-    BaudRate, GroupParams, Model, ProtectionStatus, SafetyLimits, ScaleCheck, Setpoints, TempUnit,
+    BaudRate, GroupParams, ProtectionStatus, SafetyLimits, ScaleCheck, Setpoints, TempUnit,
     Temperature, Xy,
 };
 
 const BAUD: u32 = 115200;
-const PACK_MODEL: Model = Model::Xy7025;
 
 // V_OUT 0–70 V, I_OUT 0–25 A, resolution 0.01.
 // OVP 0–72, OCP 0–27, OPP 0–2000, LVP 10–95, OTP 0–110.
@@ -107,7 +106,7 @@ fn main() {
     )
     .expect("UART1 init");
 
-    let mut xy = Xy::from_esp_uart(uart, PACK_MODEL);
+    let mut xy = Xy::from_esp_uart(uart);
 
     // Snapshot every writable register before we touch anything, so a
     // panic mid-suite leaves a clean log of what to manually restore.
@@ -158,7 +157,7 @@ fn main() {
     run("output_enable_disable", test_output_enable_disable(&mut xy));
     run("power_on_output", test_power_on_output(&mut xy));
     run("reg_mode", test_reg_mode(&mut xy));
-    run("temperatures", test_temperatures(&mut xy));
+    run("internal temperature", test_internal_temperature(&mut xy));
     run("temp_unit", test_temp_unit(&mut xy));
     run(
         "temp_offsets_read_only",
@@ -498,12 +497,9 @@ fn test_reg_mode(xy: &mut T) -> Result<(), String> {
     Ok(())
 }
 
-fn test_temperatures(xy: &mut T) -> Result<(), String> {
-    let t = xy.read_temperatures().map_err(driver_error)?;
-    info!(
-        "  T_INT={:.1} {:?} T_EXT={:?} (external scale unverified)",
-        t.internal.value, t.internal.unit, t.external,
-    );
+fn test_internal_temperature(xy: &mut T) -> Result<(), String> {
+    let t = xy.read_temperature_internal().map_err(driver_error)?;
+    info!("  T_INT={:.1} {:?}", t.value, t.unit);
     Ok(())
 }
 
@@ -634,7 +630,7 @@ fn test_comms_setters_idempotent(xy: &mut T) -> Result<(), String> {
 /// talk to the device. Consumes `xy` — must run last.
 fn test_lifecycle(xy: T<'static>) -> Result<(), String> {
     let transport = xy.into_transport();
-    let mut rebuilt: T<'static> = Xy::with_slave(transport, PACK_MODEL, 1).map_err(driver_error)?;
+    let mut rebuilt: T<'static> = Xy::with_slave(transport, 1).map_err(driver_error)?;
 
     // Final round-trip on the rebuilt instance.
     let check = rebuilt.verify_scale_family().map_err(driver_error)?;

@@ -5,11 +5,9 @@ This file provides guidance to coding agents working in this repository.
 ## Crate scope
 
 `xy-modbus` is a `no_std` Modbus-RTU driver whose high-level API targets the
-XY7025 programmable buck converter. Devices with the same 14-register group
-layout can use an explicit custom profile; SK-family devices have a 15-register
-layout and currently use the raw framing/transport layers. Related variants
-share the core function codes but differ in fixed-point scales, physical limits,
-and optional registers.
+XY7025 programmable buck converter. Other devices use the raw framing/transport
+layers; related variants share core function codes but differ in fixed-point
+scales, physical limits, optional registers, and memory-group layouts.
 
 ## Workspace boundary
 
@@ -41,8 +39,8 @@ Three layers, cleanly separated; each can be used standalone:
    per-read inactivity timeout (see `DATASHEET.md` §2).
 3. **`device`** — `Xy<T: ModbusTransport>` high-level API: one method per
    logical operation. Fixed-point conversion (`to_reg` / `from_reg`) lives
-   here; scales and physical write limits come from `Model`. Getting the scale
-   family wrong silently yields readings off by 10×, so
+   here with the verified XY7025 scales and physical write limits. Getting the
+   scale family wrong silently yields readings off by 10×, so
    `verify_scale_family` should run during bring-up.
 
 `uart::UartTransport` (gated behind the default `embedded-io` feature) is a
@@ -54,9 +52,8 @@ bring your own.
 addresses.
 
 `types/` splits value types by concern: `enums` (BaudRate, ProtectionStatus,
-RegMode, TempUnit), `model` (Model + per-model scales), `status` (live
-readings, setpoints, safety limits, totals, on-time, temperatures), `group`
-(M0–M9 memory group params).
+RegMode, TempUnit), `status` (live readings, setpoints, safety limits, totals,
+on-time, temperature), `group` (M0–M9 memory group params).
 
 ## On-device test example
 
@@ -95,10 +92,10 @@ encoded in the driver / datasheet — keep them in mind when extending:
 - **Backlight floor is 1, not 0.** Writing 0 reads back as 1 — the
   display can't be fully extinguished via Modbus.
 - **SLEEP cap is 9 minutes.** Any write ≥10 reads back as 9. 0 disables.
-- **`Temperatures.external`** is `None` when the disconnected-probe sentinel
-  is present. We had no thermistor connected during bring-up, so the decoding
-  scale for a connected probe remains unverified. The internal sensor is
-  verified.
+- **External-probe temperature (`T_EX`) is raw-only.** Bring-up had no
+  thermistor connected, so the connected-probe scale remains unverified. The
+  high-level API exposes only the verified internal sensor; use raw register
+  access for explicit external-probe validation.
 
 ## Project-specific conventions
 

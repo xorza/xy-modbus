@@ -13,7 +13,7 @@ repository has no branch named `main`.
   transport failures without storing string pointers in embedded errors.
 - Added `Temperature`, which pairs each temperature value with its `TempUnit`
   and supports explicit unit conversion.
-- Added model-aware validation for voltage, current, protection, group, slave,
+- Added XY7025-aware validation for voltage, current, protection, group, slave,
   display, sleep, baud-rate, and temperature-unit writes before any I/O occurs.
 - Added `Xy::read_raw_holding` and `Xy::write_raw_holding` for raw register access
   through the configured transport and slave.
@@ -21,8 +21,8 @@ repository has no branch named `main`.
   failures.
 - Added exact framing and device tests for invalid counts, malformed responses,
   exception function codes, trailing bytes, invalid register values, boundary
-  inputs, model limits, and lossless 32-bit conversions.
-- Added `REVIEW.md` with the applied review recommendations and the design
+  inputs, physical limits, and lossless 32-bit conversions.
+- Added `LIBRARY_REVIEW.md` with the review recommendations and the design
   decisions intentionally deferred for later work.
 
 ### Changed
@@ -31,22 +31,27 @@ repository has no branch named `main`.
   from public types.
 - **Breaking:** High-level `Xy` methods now return `XyError`; `Xy::with_slave`
   validates its address and returns `Result`.
-- **Breaking:** Removed the trivial `Xy::slave`, `Xy::model`, and `Xy::transport`
-  accessors. Raw access now uses the configured-slave methods, while
+- **Breaking:** Removed the trivial `Xy::slave` and `Xy::transport` accessors.
+  Raw access now uses the configured-slave methods, while
   `Xy::into_transport` still recovers the transport.
 - **Breaking:** `GroupParams` now embeds `Setpoints` and `SafetyLimits`, and its
   32-bit charge and energy fields use `f64`.
 - **Breaking:** `Status` now embeds `Setpoints` instead of duplicating `v_set`
   and `i_set` fields.
-- **Breaking:** `Totals` charge and energy fields use `f64`, and
-  `Temperatures` now returns unit-tagged `Temperature` values.
+- **Breaking:** `Totals` charge and energy fields use `f64`.
+- **Breaking:** Removed `Temperatures` and `read_temperatures`; the high-level
+  API now exposes only the verified internal sensor through
+  `read_temperature_internal`. The unverified external-probe register remains
+  available through raw access.
 - **Breaking:** `GroupParams::s_otp` is now a unit-tagged `Temperature`;
   `write_group` converts it to the active unit and returns the values read back
   after firmware clamping or rounding.
-- **Breaking:** Custom models now require explicit scales and physical limits;
-  `verify_scale_family` returns `ScaleCheck::Compatible` or `Inconclusive`
-  without claiming exact model identity. Wire-encoded enums no longer expose
-  `Unknown(u16)` variants.
+- **Breaking:** Removed `Model`, `ModelScales`, `ModelLimits`, `ModelRange`, and
+  the model arguments from `Xy` constructors. The high-level API now applies
+  only hardware-verified XY7025 scales and limits; other devices use the raw
+  protocol layers. `verify_scale_family` still returns
+  `ScaleCheck::Compatible` or `Inconclusive` without claiming exact identity.
+  Wire-encoded enums no longer expose `Unknown(u16)` variants.
 - **Breaking:** `RtuError::Io` now carries an `IoOperation` and portable
   `IoErrorKind`. `BlockingRead` extends `embedded_io::ErrorType` so read and
   write failures preserve the same error classification. `ModbusError` is owned
@@ -60,6 +65,10 @@ repository has no branch named `main`.
   `FrameError::BroadcastRead`. FC06 and FC10 builders continue to accept address
   `0`, and `UartTransport` transmits those broadcasts without waiting for the
   response that Modbus explicitly omits.
+- **Breaking:** Raw frame builders and `UartTransport` now reject reserved slave
+  addresses `248..=255`; UART reads return `RtuError::InvalidSlaveAddress`
+  instead of panicking on broadcast address `0`. `build_write_single_request`
+  now returns `Result` so invalid addresses are reported before a frame is made.
 - **Breaking:** `UartTransport::release` was replaced by `into_parts`, returning
   the named `UartParts` struct. `BlockingRead` now lives with the UART transport.
 - **Breaking:** `UartTransport::with_timing` now accepts a validated
@@ -73,7 +82,7 @@ repository has no branch named `main`.
 - Disabled `esp-idf-hal` default features in the library adapter so application
   startup policy, including `binstart`, remains with the final ESP application.
 - Updated the ESP32-C6 hardware example for validated APIs, raw register access,
-  nested group parameters, precise totals, optional external temperature, and
+  nested group parameters, precise totals, verified internal temperature, and
   the revised error model.
 - Ignored the project-local `.venv` used for ESP-IDF tooling.
 - Updated `README.md`, `DATASHEET.md`, and `AGENTS.md` to match the supported
@@ -91,12 +100,12 @@ repository has no branch named `main`.
   range.
 - Retried interrupted UART reads, writes, drains, and flushes in place so a
   partial transaction is not abandoned or replayed from the beginning.
-- Rejected fixed-point writes whose rounded wire value falls outside a custom
-  model's declared physical range.
+- Rejected fixed-point writes whose rounded wire value falls outside the
+  declared physical range.
 - Restarted the complete pre-transmit quiet interval whenever draining observes
   RX activity, bounded acquisition with a typed busy error, and reported drain
   failures before writing a request.
-- Rejected non-finite, negative, out-of-model-range, and unrepresentable write
+- Rejected non-finite, negative, out-of-range, and unrepresentable write
   values instead of silently clamping or normalizing them.
 - Enforced the documented XY7025 LVP minimum of 10 V for standalone and group
   protection writes.
@@ -106,8 +115,8 @@ repository has no branch named `main`.
   using `f64` for cumulative counters and group limits.
 - Recognized both documented XY7025-family model codes, `0x6100` and `0x6500`,
   while treating unknown codes as inconclusive rather than mismatches.
-- Decoded disconnected external temperature probes as `None` when the device
-  reports its `888.8` sentinel.
+- Removed connected external-probe temperature from the high-level API because
+  its scale has not been verified on hardware.
 - Rejected invalid boolean, protection, regulation-mode, temperature-unit,
   baud-rate, backlight, sleep, slave-address, and group register values instead
   of coercing them into valid states or exposing them as domain enum variants.

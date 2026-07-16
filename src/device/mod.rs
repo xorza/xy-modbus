@@ -8,12 +8,58 @@ use crate::regs::*;
 use crate::transport::{ModbusTransport, RtuError};
 use crate::types::enums::{BaudRate, ProtectionStatus, RegMode, TempUnit};
 use crate::types::group::GroupParams;
-use crate::types::model::{Model, ModelRange, ScaleCheck};
-use crate::types::status::{
-    OnTime, SafetyLimits, Setpoints, Status, Temperature, Temperatures, Totals,
+use crate::types::status::{OnTime, SafetyLimits, Setpoints, Status, Temperature, Totals};
+
+const CURRENT_SCALE: f32 = 100.0;
+const POWER_SCALE: f32 = 10.0;
+const OPP_SCALE: f32 = 1.0;
+
+#[derive(Copy, Clone, Debug)]
+struct ValueRange {
+    min: f64,
+    max: f64,
+}
+
+impl ValueRange {
+    fn contains(self, value: f64) -> bool {
+        self.min <= value && value <= self.max
+    }
+}
+
+const VOLTAGE_SET_RANGE: ValueRange = ValueRange {
+    min: 0.0,
+    max: 70.0,
+};
+const CURRENT_SET_RANGE: ValueRange = ValueRange {
+    min: 0.0,
+    max: 25.0,
+};
+const LVP_RANGE: ValueRange = ValueRange {
+    min: 10.0,
+    max: 95.0,
+};
+const OVP_RANGE: ValueRange = ValueRange {
+    min: 0.0,
+    max: 72.0,
+};
+const OCP_RANGE: ValueRange = ValueRange {
+    min: 0.0,
+    max: 27.0,
+};
+const OPP_RANGE: ValueRange = ValueRange {
+    min: 0.0,
+    max: 2000.0,
+};
+const CHARGE_LIMIT_RANGE: ValueRange = ValueRange {
+    min: 0.0,
+    max: 9999.0,
+};
+const ENERGY_LIMIT_RANGE: ValueRange = ValueRange {
+    min: 0.0,
+    max: 4_200_000.0,
 };
 
-fn to_reg_u16(v: f32, scale: f32, range: ModelRange, field: InputField) -> Result<u16, InputError> {
+fn to_reg_u16(v: f32, scale: f32, range: ValueRange, field: InputField) -> Result<u16, InputError> {
     if !v.is_finite() {
         return Err(InputError::NonFinite { field });
     }
@@ -57,7 +103,7 @@ struct RegisterWords {
 fn to_reg_u32(
     v: f64,
     scale: f64,
-    range: ModelRange,
+    range: ValueRange,
     field: InputField,
 ) -> Result<RegisterWords, InputError> {
     if !v.is_finite() {
@@ -125,38 +171,38 @@ fn decode_u16_max(register: u16, value: u16, max: u16) -> Result<u16, XyError> {
     }
 }
 
-/// High-level driver for XY7025 and compatible 14-register profiles.
+/// Result of checking whether the device's `MODEL` register belongs to the
+/// scale family supported by [`Xy`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum ScaleCheck {
+    Compatible { device_code: u16 },
+    Inconclusive { device_code: u16 },
+}
+
+/// High-level driver for the XY7025.
 ///
 /// Construct with [`Xy::new`] (default slave `0x01`) or
-/// [`Xy::with_slave`]. The [`Model`] supplies fixed-point scales and physical
-/// write limits. Passing the wrong scale family silently yields readings off by
-/// 10×, so call [`Self::verify_scale_family`] during bring-up.
+/// [`Xy::with_slave`]. Call [`Self::verify_scale_family`] during bring-up to
+/// catch devices whose fixed-point scales are not known to be compatible.
 #[derive(Debug)]
 pub struct Xy<T: ModbusTransport> {
     transport: T,
     slave: u8,
-    model: Model,
 }
 
 impl<T: ModbusTransport> Xy<T> {
     /// Wrap a transport using the default slave address (`0x01`).
-    pub fn new(transport: T, model: Model) -> Self {
-        model.assert_valid();
+    pub fn new(transport: T) -> Self {
         Self {
             transport,
             slave: DEFAULT_SLAVE,
-            model,
         }
     }
 
-    pub fn with_slave(transport: T, model: Model, slave: u8) -> Result<Self, InputError> {
-        model.assert_valid();
+    pub fn with_slave(transport: T, slave: u8) -> Result<Self, InputError> {
         validate_slave(slave)?;
-        Ok(Self {
-            transport,
-            slave,
-            model,
-        })
+        Ok(Self { transport, slave })
     }
 
     /// Read holding registers through the configured transport and slave.
@@ -180,7 +226,7 @@ impl<T: ModbusTransport> Xy<T> {
     pub fn read_setpoints(&mut self) -> Result<Setpoints, XyError> {
         let mut r = [0u16; 2];
         self.transport.read_holding(self.slave, REG_V_SET, &mut r)?;
-        Ok(decode_setpoints(r[0], r[1], self.model.current_scale()))
+        Ok(decode_setpoints(r[0], r[1], CURRENT_SCALE))
     }
 
     /// Read the live + control snapshot (registers 0x0000–0x0012) in
@@ -193,13 +239,15 @@ impl<T: ModbusTransport> Xy<T> {
         const LEN: usize = REG_OUTPUT_EN as usize + 1;
         let mut r = [0u16; LEN];
         self.transport.read_holding(self.slave, REG_V_SET, &mut r)?;
-        let i_scale = self.model.current_scale();
-        let p_scale = self.model.power_scale();
         Ok(Status {
-            setpoints: decode_setpoints(r[REG_V_SET as usize], r[REG_I_SET as usize], i_scale),
+            setpoints: decode_setpoints(
+                r[REG_V_SET as usize],
+                r[REG_I_SET as usize],
+                CURRENT_SCALE,
+            ),
             v_out: from_reg_u16(r[REG_V_OUT as usize], 100.0),
-            i_out: from_reg_u16(r[REG_I_OUT as usize], i_scale),
-            p_out: from_reg_u16(r[REG_P_OUT as usize], p_scale),
+            i_out: from_reg_u16(r[REG_I_OUT as usize], CURRENT_SCALE),
+            p_out: from_reg_u16(r[REG_P_OUT as usize], POWER_SCALE),
             v_in: from_reg_u16(r[REG_V_IN as usize], 100.0),
             protection: decode_register(
                 REG_PROTECT,
@@ -215,16 +263,10 @@ impl<T: ModbusTransport> Xy<T> {
         Ok(from_reg_u16(self.read_one(REG_V_OUT)?, 100.0))
     }
     pub fn read_current_out(&mut self) -> Result<f32, XyError> {
-        Ok(from_reg_u16(
-            self.read_one(REG_I_OUT)?,
-            self.model.current_scale(),
-        ))
+        Ok(from_reg_u16(self.read_one(REG_I_OUT)?, CURRENT_SCALE))
     }
     pub fn read_power_out(&mut self) -> Result<f32, XyError> {
-        Ok(from_reg_u16(
-            self.read_one(REG_P_OUT)?,
-            self.model.power_scale(),
-        ))
+        Ok(from_reg_u16(self.read_one(REG_P_OUT)?, POWER_SCALE))
     }
     pub fn read_voltage_in(&mut self) -> Result<f32, XyError> {
         Ok(from_reg_u16(self.read_one(REG_V_IN)?, 100.0))
@@ -254,20 +296,15 @@ impl<T: ModbusTransport> Xy<T> {
     /// V-SET higher than the current S-OVP latches OVP immediately —
     /// program protection (see [`Self::set_protection`]) first.
     pub fn set_voltage(&mut self, volts: f32) -> Result<(), XyError> {
-        let raw = to_reg_u16(
-            volts,
-            100.0,
-            self.model.limits().voltage_set_v,
-            InputField::VoltageSetpoint,
-        )?;
+        let raw = to_reg_u16(volts, 100.0, VOLTAGE_SET_RANGE, InputField::VoltageSetpoint)?;
         self.write_one(REG_V_SET, raw)
     }
 
     pub fn set_current_limit(&mut self, amps: f32) -> Result<(), XyError> {
         let raw = to_reg_u16(
             amps,
-            self.model.current_scale(),
-            self.model.limits().current_set_a,
+            CURRENT_SCALE,
+            CURRENT_SET_RANGE,
             InputField::CurrentSetpoint,
         )?;
         self.write_one(REG_I_SET, raw)
@@ -276,24 +313,13 @@ impl<T: ModbusTransport> Xy<T> {
     /// Program LVP / OVP / OCP into the active group's protection
     /// registers (0x0052–0x0054) in one bulk write.
     pub fn set_protection(&mut self, l: SafetyLimits) -> Result<(), XyError> {
-        let limits = self.model.limits();
         let values = [
-            to_reg_u16(
-                l.lvp_v,
-                100.0,
-                limits.lvp_v,
-                InputField::LowVoltageProtection,
-            )?,
-            to_reg_u16(
-                l.ovp_v,
-                100.0,
-                limits.ovp_v,
-                InputField::OverVoltageProtection,
-            )?,
+            to_reg_u16(l.lvp_v, 100.0, LVP_RANGE, InputField::LowVoltageProtection)?,
+            to_reg_u16(l.ovp_v, 100.0, OVP_RANGE, InputField::OverVoltageProtection)?,
             to_reg_u16(
                 l.ocp_a,
-                self.model.current_scale(),
-                limits.ocp_a,
+                CURRENT_SCALE,
+                OCP_RANGE,
                 InputField::OverCurrentProtection,
             )?,
         ];
@@ -309,7 +335,7 @@ impl<T: ModbusTransport> Xy<T> {
         Ok(SafetyLimits {
             lvp_v: from_reg_u16(r[0], 100.0),
             ovp_v: from_reg_u16(r[1], 100.0),
-            ocp_a: from_reg_u16(r[2], self.model.current_scale()),
+            ocp_a: from_reg_u16(r[2], CURRENT_SCALE),
         })
     }
 
@@ -356,9 +382,11 @@ impl<T: ModbusTransport> Xy<T> {
         decode_register(REG_CVCC, value, RegMode::from_reg)
     }
 
-    /// Read both sensors and their unit in one register snapshot.
-    /// See [`Temperatures`] for caveats on the external field.
-    pub fn read_temperatures(&mut self) -> Result<Temperatures, XyError> {
+    /// Read the verified internal sensor and its unit in one register snapshot.
+    /// The external-probe register remains available through
+    /// [`Self::read_raw_holding`], but is not exposed at the high level because
+    /// its connected-probe scale has not been verified on hardware.
+    pub fn read_temperature_internal(&mut self) -> Result<Temperature, XyError> {
         const LEN: usize = (REG_TEMP_UNIT - REG_T_IN + 1) as usize;
         let mut r = [0u16; LEN];
         self.transport.read_holding(self.slave, REG_T_IN, &mut r)?;
@@ -367,15 +395,9 @@ impl<T: ModbusTransport> Xy<T> {
             r[(REG_TEMP_UNIT - REG_T_IN) as usize],
             TempUnit::from_reg,
         )?;
-        Ok(Temperatures {
-            internal: Temperature {
-                value: from_reg_u16(r[0], 10.0),
-                unit,
-            },
-            external: (r[1] != 8888).then(|| Temperature {
-                value: from_reg_u16(r[1], 10.0),
-                unit,
-            }),
+        Ok(Temperature {
+            value: from_reg_u16(r[0], 10.0),
+            unit,
         })
     }
 
@@ -460,15 +482,14 @@ impl<T: ModbusTransport> Xy<T> {
     }
 
     /// Read the device's `MODEL` register and check whether it belongs to the
-    /// configured [`Model`]'s scale family. This catches the footgun where
-    /// `read_status().i_out` silently comes back 10× off, but it does not prove
-    /// exact hardware identity or physical limits.
+    /// XY7025 scale family. This catches the footgun where `read_status().i_out`
+    /// silently comes back 10× off, but it does not prove exact hardware
+    /// identity or physical limits.
     ///
-    /// Returns [`ScaleCheck::Inconclusive`] for unknown device codes or custom
-    /// profiles without a canonical code.
+    /// Returns [`ScaleCheck::Inconclusive`] for unknown device codes.
     pub fn verify_scale_family(&mut self) -> Result<ScaleCheck, XyError> {
         let device_code = self.read_model()?;
-        if self.model.recognizes_scale_code(device_code) {
+        if matches!(device_code, 0x6100 | 0x6500) {
             Ok(ScaleCheck::Compatible { device_code })
         } else {
             Ok(ScaleCheck::Inconclusive { device_code })
@@ -531,7 +552,7 @@ impl<T: ModbusTransport> Xy<T> {
         let mut r = [0u16; GROUP_LEN as usize];
         let addr = group_addr(n);
         self.transport.read_holding(self.slave, addr, &mut r)?;
-        decode_group(&r, self.model, addr, unit)
+        decode_group(&r, addr, unit)
     }
 
     /// Write all 14 registers of memory group `n` (0–9), then return the values
@@ -543,7 +564,7 @@ impl<T: ModbusTransport> Xy<T> {
     /// front panel while this operation is in progress.
     pub fn write_group(&mut self, n: u8, p: &GroupParams) -> Result<GroupParams, XyError> {
         validate_group(n)?;
-        let encoding = encode_group(p, self.model)?;
+        let encoding = encode_group(p)?;
         let unit = self.read_temp_unit()?;
         let regs = encoding.for_unit(unit)?;
         if n == 0 {
@@ -579,11 +600,9 @@ impl<T: ModbusTransport> Xy<T> {
 
 fn decode_group(
     r: &[u16; GROUP_LEN as usize],
-    model: Model,
     addr: u16,
     unit: TempUnit,
 ) -> Result<GroupParams, XyError> {
-    let i_scale = model.current_scale();
     let [
         v_set,
         i_set,
@@ -601,13 +620,13 @@ fn decode_group(
         s_ini,
     ] = *r;
     Ok(GroupParams {
-        setpoints: decode_setpoints(v_set, i_set, i_scale),
+        setpoints: decode_setpoints(v_set, i_set, CURRENT_SCALE),
         safety_limits: SafetyLimits {
             lvp_v: from_reg_u16(s_lvp, 100.0),
             ovp_v: from_reg_u16(s_ovp, 100.0),
-            ocp_a: from_reg_u16(s_ocp, i_scale),
+            ocp_a: from_reg_u16(s_ocp, CURRENT_SCALE),
         },
-        s_opp_w: from_reg_u16(s_opp, model.opp_scale()),
+        s_opp_w: from_reg_u16(s_opp, OPP_SCALE),
         s_ohp_h: decode_u16_max(addr + 6, s_ohp_h, 99)?,
         s_ohp_m: decode_u16_max(addr + 7, s_ohp_m, 59)?,
         s_oah_ah: from_reg_u32(s_oah_low, s_oah_high, 1000.0),
@@ -633,63 +652,61 @@ impl GroupEncoding {
     }
 }
 
-fn encode_group(p: &GroupParams, model: Model) -> Result<GroupEncoding, InputError> {
+fn encode_group(p: &GroupParams) -> Result<GroupEncoding, InputError> {
     if !p.s_otp.value.is_finite() {
         return Err(InputError::NonFinite {
             field: InputField::OverTemperatureProtection,
         });
     }
-    let i_scale = model.current_scale();
-    let limits = model.limits();
     validate_u16_max(p.s_ohp_h, 99, InputField::OutputTimeHours)?;
     validate_u16_max(p.s_ohp_m, 59, InputField::OutputTimeMinutes)?;
     let oah = to_reg_u32(
         p.s_oah_ah,
         1000.0,
-        limits.charge_limit_ah,
+        CHARGE_LIMIT_RANGE,
         InputField::ChargeLimit,
     )?;
     let owh = to_reg_u32(
         p.s_owh_wh,
         100.0,
-        limits.energy_limit_wh,
+        ENERGY_LIMIT_RANGE,
         InputField::EnergyLimit,
     )?;
     let values = [
         to_reg_u16(
             p.setpoints.v_set,
             100.0,
-            limits.voltage_set_v,
+            VOLTAGE_SET_RANGE,
             InputField::VoltageSetpoint,
         )?,
         to_reg_u16(
             p.setpoints.i_set,
-            i_scale,
-            limits.current_set_a,
+            CURRENT_SCALE,
+            CURRENT_SET_RANGE,
             InputField::CurrentSetpoint,
         )?,
         to_reg_u16(
             p.safety_limits.lvp_v,
             100.0,
-            limits.lvp_v,
+            LVP_RANGE,
             InputField::LowVoltageProtection,
         )?,
         to_reg_u16(
             p.safety_limits.ovp_v,
             100.0,
-            limits.ovp_v,
+            OVP_RANGE,
             InputField::OverVoltageProtection,
         )?,
         to_reg_u16(
             p.safety_limits.ocp_a,
-            i_scale,
-            limits.ocp_a,
+            CURRENT_SCALE,
+            OCP_RANGE,
             InputField::OverCurrentProtection,
         )?,
         to_reg_u16(
             p.s_opp_w,
-            model.opp_scale(),
-            limits.opp_w,
+            OPP_SCALE,
+            OPP_RANGE,
             InputField::OverPowerProtection,
         )?,
         p.s_ohp_h,
@@ -719,7 +736,7 @@ fn encode_group_otp(temperature: Temperature, unit: TempUnit) -> Result<u16, Inp
     to_reg_u16(
         temperature.value,
         1.0,
-        ModelRange { min: 0.0, max },
+        ValueRange { min: 0.0, max },
         InputField::OverTemperatureProtection,
     )
 }

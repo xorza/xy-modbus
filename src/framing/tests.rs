@@ -33,7 +33,7 @@ fn build_read_matches_known() {
 
 #[test]
 fn build_write_single_matches_known() {
-    let req = build_write_single_request(0x01, 0x0012, 0x0001);
+    let req = build_write_single_request(0x01, 0x0012, 0x0001).unwrap();
     assert_eq!(req, [0x01, 0x06, 0x00, 0x12, 0x00, 0x01, 0xE8, 0x0F]);
 }
 
@@ -164,13 +164,13 @@ fn parse_read_exception_with_bad_crc_is_bad_crc() {
 
 #[test]
 fn parse_write_single_valid_echo() {
-    let req = build_write_single_request(0x01, 0x0012, 0x0001);
+    let req = build_write_single_request(0x01, 0x0012, 0x0001).unwrap();
     parse_write_single_response(&req, &req).unwrap();
 }
 
 #[test]
 fn parse_write_single_rejects_value_mismatch() {
-    let req = build_write_single_request(0x01, 0x0012, 0x0001);
+    let req = build_write_single_request(0x01, 0x0012, 0x0001).unwrap();
     let mut resp = req;
     resp[5] = 0x02;
     let crc = crc16_modbus(&resp[..6]);
@@ -184,7 +184,7 @@ fn parse_write_single_rejects_value_mismatch() {
 
 #[test]
 fn parse_write_single_exception_returns_exception() {
-    let req = build_write_single_request(0x01, 0x0012, 0x0001);
+    let req = build_write_single_request(0x01, 0x0012, 0x0001).unwrap();
     let mut frame = std::vec![0x01u8, 0x86, 0x03];
     let crc = crc16_modbus(&frame);
     frame.push(crc as u8);
@@ -253,6 +253,36 @@ fn build_read_rejects_invalid_requests() {
         parse_read_response(&[], 0x01, &mut oversized),
         Err(ModbusError::InvalidQuantity(MAX_READ_REGS + 1))
     );
+}
+
+#[test]
+fn request_builders_validate_slave_addresses() {
+    let cases = [
+        (0, Err(FrameError::BroadcastRead), true),
+        (1, Ok(()), true),
+        (247, Ok(()), true),
+        (248, Err(FrameError::InvalidSlaveAddress(248)), false),
+        (255, Err(FrameError::InvalidSlaveAddress(255)), false),
+    ];
+
+    for (slave, read_expected, write_valid) in cases {
+        assert_eq!(
+            build_read_request(slave, 0, 1).map(|_| ()),
+            read_expected,
+            "read slave {slave}"
+        );
+        assert_eq!(
+            build_write_single_request(slave, 0, 0).is_ok(),
+            write_valid,
+            "single write slave {slave}"
+        );
+        let mut out = [0; 11];
+        assert_eq!(
+            build_write_multiple_request(slave, 0, &[0], &mut out).is_ok(),
+            write_valid,
+            "multiple write slave {slave}"
+        );
+    }
 }
 
 #[cfg(feature = "embedded-io")]
@@ -377,6 +407,10 @@ fn frame_error_display_strings() {
         "read request cannot use broadcast address 0"
     );
     assert_eq!(
+        format!("{}", FrameError::InvalidSlaveAddress(248)),
+        "invalid Modbus slave address 248"
+    );
+    assert_eq!(
         format!(
             "{}",
             FrameError::BufferTooSmall {
@@ -433,7 +467,7 @@ fn parsers_reject_trailing_bytes() {
         Err(ModbusError::BadHeader)
     );
 
-    let req = build_write_single_request(0x01, 0x0012, 1);
+    let req = build_write_single_request(0x01, 0x0012, 1).unwrap();
     let mut write = req.to_vec();
     write.push(0);
     assert_eq!(

@@ -74,6 +74,8 @@ pub enum FrameError {
     InvalidQuantity(usize),
     /// Read requests cannot use the broadcast address because no slave replies.
     BroadcastRead,
+    /// Slave address was outside the Modbus range `0..=247`.
+    InvalidSlaveAddress(u8),
     /// `out` was smaller than the assembled frame (header + payload + CRC).
     BufferTooSmall { needed: usize, actual: usize },
 }
@@ -83,6 +85,9 @@ impl core::fmt::Display for FrameError {
         match self {
             Self::InvalidQuantity(n) => write!(f, "invalid register quantity {n}"),
             Self::BroadcastRead => f.write_str("read request cannot use broadcast address 0"),
+            Self::InvalidSlaveAddress(address) => {
+                write!(f, "invalid Modbus slave address {address}")
+            }
             Self::BufferTooSmall { needed, actual } => {
                 write!(f, "buffer too small (need {needed}, have {actual})")
             }
@@ -114,13 +119,27 @@ fn append_crc(buf: &mut [u8], len: usize) {
     buf[len + 1] = (crc >> 8) as u8;
 }
 
+fn validate_read_slave(slave: u8) -> Result<(), FrameError> {
+    match slave {
+        0 => Err(FrameError::BroadcastRead),
+        1..=247 => Ok(()),
+        invalid => Err(FrameError::InvalidSlaveAddress(invalid)),
+    }
+}
+
+fn validate_write_slave(slave: u8) -> Result<(), FrameError> {
+    if slave <= 247 {
+        Ok(())
+    } else {
+        Err(FrameError::InvalidSlaveAddress(slave))
+    }
+}
+
 /// Build a unicast `Read Holding Registers` (FC `0x03`) request frame.
 pub fn build_read_request(slave: u8, addr: u16, count: u16) -> Result<[u8; 8], FrameError> {
+    validate_read_slave(slave)?;
     if count == 0 || count as usize > MAX_READ_REGS {
         return Err(FrameError::InvalidQuantity(count as usize));
-    }
-    if slave == 0 {
-        return Err(FrameError::BroadcastRead);
     }
     let mut req = [0u8; 8];
     req[0] = slave;
@@ -134,14 +153,15 @@ pub fn build_read_request(slave: u8, addr: u16, count: u16) -> Result<[u8; 8], F
 /// Build a `Write Single Holding Register` (FC `0x06`) request frame.
 ///
 /// Slave address `0` creates a broadcast request, for which no response exists.
-pub fn build_write_single_request(slave: u8, addr: u16, value: u16) -> [u8; 8] {
+pub fn build_write_single_request(slave: u8, addr: u16, value: u16) -> Result<[u8; 8], FrameError> {
+    validate_write_slave(slave)?;
     let mut req = [0u8; 8];
     req[0] = slave;
     req[1] = FN_WRITE_SINGLE;
     req[2..4].copy_from_slice(&addr.to_be_bytes());
     req[4..6].copy_from_slice(&value.to_be_bytes());
     append_crc(&mut req, 6);
-    req
+    Ok(req)
 }
 
 /// Build a `Write Multiple Holding Registers` (FC `0x10`) request into
@@ -155,6 +175,7 @@ pub fn build_write_multiple_request(
     values: &[u16],
     out: &mut [u8],
 ) -> Result<usize, FrameError> {
+    validate_write_slave(slave)?;
     if values.is_empty() || values.len() > MAX_WRITE_REGS {
         return Err(FrameError::InvalidQuantity(values.len()));
     }

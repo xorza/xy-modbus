@@ -19,9 +19,9 @@ listings share the core Modbus-RTU function codes and most register addresses.
 Their physical limits, fixed-point scales, optional registers, and memory-group
 layouts differ by family.
 
-This crate's high-level API is verified for XY7025. An explicit custom profile
-can cover devices with the same 14-register group layout; SK-family devices use
-the raw protocol layers because their groups contain a fifteenth register.
+This crate's high-level API is verified only for XY7025. Other devices use the
+raw protocol layers so XY7025 scales, limits, and firmware quirks are not
+silently applied to unverified hardware.
 
 | Model     | Vin (V) | Vout (V) | Iout (A) | Pmax (W) | Notes                               |
 | --------- | ------- | -------- | -------- | -------- | ----------------------------------- |
@@ -149,7 +149,7 @@ physical value (so `1440` with scale `100` = `14.40 V`).
 | `0x000B` | OUT_M       | Output-on time, minutes                                                                           | 1     | min   | R   |
 | `0x000C` | OUT_S       | Output-on time, seconds                                                                           | 1     | s     | R   |
 | `0x000D` | T_IN        | Internal temperature                                                                              | 10    | °C/°F | R   |
-| `0x000E` | T_EX        | External-probe temperature                                                                        | 10    | °C/°F | R   |
+| `0x000E` | T_EX        | External-probe temperature (connected-probe scale unverified; raw access only)                     | ?     | °C/°F | R   |
 | `0x000F` | LOCK        | Front-panel key lock (0=unlocked, 1=locked)                                                       | —     | —     | R/W |
 | `0x0010` | PROTECT     | Latched protection cause (see §4)                                                                 | —     | —     | R/W |
 | `0x0011` | CVCC        | Regulation mode (0=CV, 1=CC)                                                                      | —     | —     | R   |
@@ -166,6 +166,11 @@ physical value (so `1440` with scale `100` = `14.40 V`).
 | `0x001C` | BUZZER      | Buzzer enable (often unimplemented)                                                               | —     | —     | R/W |
 | `0x001D` | EXTRACT-M   | Recall memory group (write 0–9)                                                                   | —     | —     | R/W |
 | `0x001E` | DEVICE      | Device status — unreliable on some FW                                                             | —     | —     | R/W |
+
+The high-level API intentionally does not decode `T_EX`: bring-up had no
+external thermistor connected, so only the disconnected sentinel was observed
+and the connected-probe scale remains unverified. Use raw register access only
+when validating it against a known reference on the target unit.
 
 `read_totals` fetches `0x0006`–`0x000C` in one FC03 transaction, but neither
 the Modbus specification nor the device documentation guarantees that the
@@ -482,9 +487,9 @@ and output state.
   flag these high words as untested, and the firmware's cross-word snapshot
   behavior is undocumented. Don't assume an FC03 response cannot tear at a
   low-word rollover without verifying on your hardware.
-- **Temperature in F vs C** — `T_IN`/`T_EX` units are governed by
-  `F-C` (`0x0013`). Set this to `0` (Celsius) at boot if you want
-  predictable readings.
+- **Temperature in F vs C** — `T_IN` and the raw, unverified `T_EX` register
+  use the unit governed by `F-C` (`0x0013`). Set this to `0` (Celsius) at boot
+  if you want predictable internal-temperature readings.
 - **Protection-status read while output is on** — when the buck is
   actively sourcing, `PROTECT` is necessarily `0`. Only worth
   reading when `ONOFF` is `0` and you want to know _why_.

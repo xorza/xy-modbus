@@ -81,22 +81,6 @@ impl Temperature {
     }
 }
 
-/// Temperature readings from registers `0x000D` (T-IN) and `0x000E` (T-EX).
-///
-/// `internal` is the on-board sensor — verified on XY7025 hardware.
-///
-/// `external` is the optional external probe input. With no thermistor
-/// connected the register reads `888.8` as a sentinel; the
-/// decoding scale for a *connected* probe has not been verified on real
-/// hardware. Treat the value as advisory until it has been cross-checked
-/// against a known reference temperature on the target unit.
-#[derive(Copy, Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct Temperatures {
-    pub internal: Temperature,
-    pub external: Option<Temperature>,
-}
-
 /// Hard trip limits programmed into the buck's protection registers.
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

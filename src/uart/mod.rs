@@ -7,10 +7,10 @@
 //! [`crate::transport::ModbusTransport`].
 //!
 //! ```ignore
-//! use xy_modbus::{Xy, uart::UartTransport};
+//! use xy_modbus::{uart::UartTransport, Xy};
 //!
 //! let transport = UartTransport::new(uart, delay);
-//! let mut xy = Xy::new(transport, Model::Xy7025);
+//! let mut xy = Xy::new(transport);
 //! ```
 //!
 //! Timing defaults use a 500 ms per-read inactivity timeout, a 50 ms
@@ -223,6 +223,22 @@ fn is_interrupted<E: embedded_io::Error>(error: &E) -> bool {
     error.kind() == embedded_io::ErrorKind::Interrupted
 }
 
+fn validate_read_slave(slave: u8) -> Result<(), RtuError> {
+    if (1..=247).contains(&slave) {
+        Ok(())
+    } else {
+        Err(RtuError::InvalidSlaveAddress(slave))
+    }
+}
+
+fn validate_write_slave(slave: u8) -> Result<(), RtuError> {
+    if slave <= 247 {
+        Ok(())
+    } else {
+        Err(RtuError::InvalidSlaveAddress(slave))
+    }
+}
+
 fn write_all<U: Write>(uart: &mut U, mut buf: &[u8]) -> Result<(), RtuError> {
     while !buf.is_empty() {
         match uart.write(buf) {
@@ -288,7 +304,7 @@ where
     D: DelayNs,
 {
     fn read_holding(&mut self, slave: u8, addr: u16, dst: &mut [u16]) -> Result<(), RtuError> {
-        assert!(slave != 0, "read does not support broadcast");
+        validate_read_slave(slave)?;
         if dst.is_empty() || dst.len() > MAX_READ_REGS {
             return Err(RtuError::InvalidQuantity(dst.len()));
         }
@@ -313,7 +329,9 @@ where
     }
 
     fn write_single_holding(&mut self, slave: u8, addr: u16, value: u16) -> Result<(), RtuError> {
-        let req = framing::build_write_single_request(slave, addr, value);
+        validate_write_slave(slave)?;
+        let req = framing::build_write_single_request(slave, addr, value)
+            .expect("slave address validated above");
 
         self.pre_tx_silence()?;
         write_all(&mut self.uart, &req)?;
@@ -338,6 +356,7 @@ where
         addr: u16,
         values: &[u16],
     ) -> Result<(), RtuError> {
+        validate_write_slave(slave)?;
         if values.is_empty() || values.len() > MAX_WRITE_REGS {
             return Err(RtuError::InvalidQuantity(values.len()));
         }

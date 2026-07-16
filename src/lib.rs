@@ -1,6 +1,5 @@
-//! Driver for the XY7025 programmable buck converter. Devices with the same
-//! 14-register group layout can use an explicit [`Model::Custom`] profile;
-//! other XY-series devices remain accessible through the raw protocol layers.
+//! Driver for the XY7025 programmable buck converter. Other XY-series devices
+//! remain accessible through the raw protocol layers.
 //!
 //! These modules share a common Modbus-RTU register layout — see the
 //! crate's `DATASHEET.md` for the full protocol reference.
@@ -16,9 +15,9 @@
 //! # }
 //! # fn main() -> Result<(), XyError> {
 //! # let my_transport = MyTransport;
-//! use xy_modbus::{Model, Xy, SafetyLimits};
+//! use xy_modbus::{SafetyLimits, Xy};
 //!
-//! let mut xy = Xy::new(my_transport, Model::Xy7025);
+//! let mut xy = Xy::new(my_transport);
 //! xy.set_protection(SafetyLimits { lvp_v: 22.0, ovp_v: 15.0, ocp_a: 15.0 })?;
 //! xy.set_voltage(13.5)?;
 //! xy.set_current_limit(10.0)?;
@@ -40,9 +39,9 @@
 //! constructor so you don't need to write a UART wrapper:
 //!
 //! ```ignore
-//! use xy_modbus::{Model, Xy};
+//! use xy_modbus::Xy;
 //!
-//! let mut xy = Xy::from_esp_uart(uart, Model::Xy7025);
+//! let mut xy = Xy::from_esp_uart(uart);
 //! xy.set_voltage(13.5)?;
 //! ```
 
@@ -64,11 +63,8 @@ pub mod uart;
 #[cfg(all(feature = "esp-idf-hal", target_os = "espidf"))]
 pub mod esp_idf;
 
-pub use device::Xy;
 pub use device::error::{InputError, InputField, XyError};
+pub use device::{ScaleCheck, Xy};
 pub use types::enums::{BaudRate, ProtectionStatus, RegMode, TempUnit};
 pub use types::group::GroupParams;
-pub use types::model::{Model, ModelLimits, ModelRange, ModelScales, ScaleCheck};
-pub use types::status::{
-    OnTime, SafetyLimits, Setpoints, Status, Temperature, Temperatures, Totals,
-};
+pub use types::status::{OnTime, SafetyLimits, Setpoints, Status, Temperature, Totals};

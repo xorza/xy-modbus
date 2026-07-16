@@ -16,8 +16,7 @@ use crate::types::status::{SafetyLimits, Setpoints, Temperature};
 pub struct GroupParams {
     pub setpoints: Setpoints,
     pub safety_limits: SafetyLimits,
-    /// Over-power threshold in W. Resolution depends on model (1 W on
-    /// XY7025, 0.1 W on the SK family).
+    /// Over-power threshold in W (1 W resolution on XY7025).
     pub s_opp_w: f32,
     /// Output-on time limit, hours.
     pub s_ohp_h: u16,

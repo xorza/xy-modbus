@@ -7,19 +7,17 @@
 Only tested on real XY7025 hardware; other models share the register layout but
 are unverified.
 
-The pure framing and transport layers cover the shared XY-series function
-codes. The high-level `Xy` API is verified on XY7025 hardware; compatible
-devices with the same 14-register memory-group layout can use an explicit
-`Model::Custom` profile with caller-supplied scales and physical limits. The SK
-family uses a 15-register layout and is intentionally limited to raw protocol
-access until it has a dedicated profile.
+The high-level `Xy` API is intentionally XY7025-specific. The pure framing and
+transport layers cover the shared XY-series function codes so other devices can
+still be accessed without applying unverified XY7025 scales or limits. The SK
+family uses a different 15-register group layout and remains raw-only.
 
 ## Usage
 
 ```rust,ignore
-use xy_modbus::{Model, SafetyLimits, Xy};
+use xy_modbus::{SafetyLimits, Xy};
 
-let mut xy = Xy::new(my_transport, Model::Xy7025);
+let mut xy = Xy::new(my_transport);
 
 xy.set_protection(SafetyLimits { lvp_v: 22.0, ovp_v: 15.0, ocp_a: 15.0 })?;
 xy.set_voltage(13.5)?;
@@ -29,18 +27,20 @@ xy.set_output(true)?;
 let s = xy.read_status()?;
 ```
 
-`Model` selects both per-register scales and the physical ranges validated
-before writes. The wrong scale family silently shifts current and power
-readings by 10×, so call `xy.verify_scale_family()?` at boot. A
-`ScaleCheck::Compatible` result confirms the wire scales only—not exact hardware
-identity or mechanical limits. Unknown codes and custom profiles return
-`ScaleCheck::Inconclusive`.
+The wrong scale family silently shifts current and power readings by 10×, so
+call `xy.verify_scale_family()?` at boot. A `ScaleCheck::Compatible` result
+confirms the wire scales only—not exact hardware identity or mechanical limits.
+Unknown codes return `ScaleCheck::Inconclusive`.
+
+Only the verified internal temperature sensor is exposed by the high-level API.
+The connected external-probe scale is unverified; register `0x000E` remains
+available through `Xy::read_raw_holding` for explicit bring-up work.
 
 ## Transport
 
 The default `embedded-io` feature ships `uart::UartTransport` over any
 `uart::BlockingRead + embedded_io::Write` pair. For `esp-idf-hal`, enable
-the `esp-idf-hal` feature and use `Xy::from_esp_uart(uart, model)`.
+the `esp-idf-hal` feature and use `Xy::from_esp_uart(uart)`.
 To bring your own, implement `transport::ModbusTransport` directly—the
 `framing` module exposes the on-wire codec and errors.
 

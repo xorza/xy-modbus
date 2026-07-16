@@ -2,5 +2,4 @@
 
 pub(crate) mod enums;
 pub(crate) mod group;
-pub(crate) mod model;
 pub(crate) mod status;

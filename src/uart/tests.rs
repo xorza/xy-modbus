@@ -143,7 +143,7 @@ fn read_holding_round_trip() {
 #[test]
 fn write_single_round_trip() {
     // Echo response.
-    let req = framing::build_write_single_request(0x01, 0x0012, 0x0001);
+    let req = framing::build_write_single_request(0x01, 0x0012, 0x0001).unwrap();
     let uart = MockUart::new(req.to_vec());
     let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     t.write_single_holding(0x01, 0x0012, 0x0001).unwrap();
@@ -544,12 +544,27 @@ fn pre_tx_drain_error_is_reported_before_write() {
 }
 
 #[test]
-#[should_panic(expected = "broadcast")]
-fn slave_zero_panics_on_read() {
+fn invalid_slave_addresses_fail_before_uart_io() {
     let uart = MockUart::new(Vec::new());
     let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     let mut out = [0u16; 1];
-    let _ = t.read_holding(0x00, 0x0000, &mut out);
+    for slave in [0, 248, 255] {
+        assert_eq!(
+            t.read_holding(slave, 0, &mut out),
+            Err(RtuError::InvalidSlaveAddress(slave))
+        );
+    }
+    for slave in [248, 255] {
+        assert_eq!(
+            t.write_single_holding(slave, 0, 0),
+            Err(RtuError::InvalidSlaveAddress(slave))
+        );
+        assert_eq!(
+            t.write_multiple_holdings(slave, 0, &[0]),
+            Err(RtuError::InvalidSlaveAddress(slave))
+        );
+    }
+    assert!(t.into_parts().uart.tx.is_empty());
 }
 
 #[test]
