@@ -60,11 +60,12 @@ on-time, temperature), `group` (M0–M9 memory group params).
 `examples/esp32c6-test/` is a standalone Cargo project (own
 `rust-toolchain.toml`, `sdkconfig.defaults`, `.cargo/config.toml`, separate
 `[workspace]`) that runs a 25-test sweep against a real XY7025 over UART1
-on an ESP32-C6 (GPIO16/17, 115200 8N1). It snapshots every writable
-register at start, sweeps every public API method (V/I/protection sweeps,
-output enable/disable, all M0–M9 groups, lifecycle via `into_transport` +
-`Xy::with_slave`), and restores the snapshot at end. Includes raw-transport
-probes for S-OTP / T-IN-OFFSET / SLEEP that document firmware-side quirks.
+on an ESP32-C6 (GPIO16/17, 115200 8N1). It snapshots persistent
+configuration as exact register words, sweeps every public API method
+(V/I/protection sweeps, output enable/disable, all M0–M9 groups, lifecycle
+via `into_transport` + `Xy::with_slave`), and verifies exact restoration at
+the end while leaving the live output safely off. Includes asserted
+raw-transport checks for S-OTP / T-IN-OFFSET / SLEEP firmware quirks.
 
 Build/flash from inside that directory: `./flash.sh`. The example pulls
 `xy-modbus` via `path = "../.."` and is not picked up by the crate root's

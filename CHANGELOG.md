@@ -84,6 +84,9 @@ repository has no branch named `main`.
 - Updated the ESP32-C6 hardware example for validated APIs, raw register access,
   nested group parameters, precise totals, verified internal temperature, and
   the revised error model.
+- Made the ESP32-C6 hardware suite fail closed on unsafe setup errors, assert
+  documented firmware quirks and full group recall contents, clean up output
+  state after failures, and verify exact raw-register restoration.
 - Ignored the project-local `.venv` used for ESP-IDF tooling.
 - Updated `README.md`, `DATASHEET.md`, and `AGENTS.md` to match the supported
   model scope, validation behavior, framing rules, UART timeout semantics,

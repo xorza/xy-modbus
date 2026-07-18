@@ -7,11 +7,12 @@
 //!
 //! WARNING: this test enables the buck output briefly with V_SET=0 and
 //! I_SET=0 to verify the on/off plumbing. Disconnect any sensitive load
-//! before running. Baud rate and slave address are read but never
-//! written — changing them would orphan the device on next boot.
+//! before running. Baud rate and slave address are never changed —
+//! changing them would orphan the device on next boot.
 //!
-//! Every other writable register is sweep-tested across its documented
-//! range. Original values are snapshotted at start and restored at end.
+//! Persistent configuration is snapshotted at start and restored at end.
+//! The live output and any latched protection cause are left safely off
+//! and cleared rather than restored.
 
 use std::thread;
 use std::time::Duration;
@@ -24,11 +25,14 @@ use esp_idf_hal::uart::config::Config;
 use esp_idf_hal::units::Hertz;
 
 use xy_modbus::{
-    BaudRate, GroupParams, ProtectionStatus, SafetyLimits, ScaleCheck, Setpoints, TempUnit,
-    Temperature, Xy,
+    GroupParams, ProtectionStatus, SafetyLimits, ScaleCheck, Setpoints, TempUnit, Temperature, Xy,
 };
 
 const BAUD: u32 = 115200;
+const GROUP_BASE: u16 = 0x0050;
+const GROUP_STRIDE: u16 = 0x0010;
+const GROUP_COUNT: usize = 10;
+const GROUP_REGISTER_COUNT: usize = 14;
 
 // V_OUT 0–70 V, I_OUT 0–25 A, resolution 0.01.
 // OVP 0–72, OCP 0–27, OPP 0–2000, LVP 10–95, OTP 0–110.
@@ -108,8 +112,8 @@ fn main() {
 
     let mut xy = Xy::from_esp_uart(uart);
 
-    // Snapshot every writable register before we touch anything, so a
-    // panic mid-suite leaves a clean log of what to manually restore.
+    // Capture exact register words so firmware conversion cannot alter
+    // temperatures while restoring a non-Celsius snapshot.
     let snapshot = match snapshot_all(&mut xy) {
         Ok(s) => s,
         Err(e) => {
@@ -119,16 +123,15 @@ fn main() {
     };
     info!("snapshot taken: {snapshot:#?}");
 
-    // Force a known-safe baseline: output OFF, protection cleared, OVP/OCP
-    // wide open so the V/I sweeps don't trip mid-write.
-    if let Err(e) = xy
-        .set_output(false)
-        .and_then(|_| xy.clear_protection_status())
-    {
-        warn!("baseline disable/clear failed: {e}");
-    }
-    if let Err(e) = xy.set_protection(HEADROOM_SAFETY) {
-        warn!("baseline set_protection failed: {e}");
+    if let Err(e) = prepare_safe_baseline(&mut xy) {
+        error!("FATAL: safe baseline failed: {e} — aborting");
+        match restore_all(&mut xy, &snapshot) {
+            Ok(()) => info!("snapshot restored after baseline failure"),
+            Err(restore_error) => {
+                error!("snapshot restore after baseline failure FAILED: {restore_error}")
+            }
+        }
+        park();
     }
 
     let mut pass = 0u32;
@@ -184,7 +187,10 @@ fn main() {
     info!("--- restoring snapshot ---");
     match restore_all(&mut xy, &snapshot) {
         Ok(()) => info!("snapshot restored"),
-        Err(e) => error!("snapshot restore FAILED: {e}"),
+        Err(e) => {
+            error!("snapshot restore FAILED: {e}");
+            fail += 1;
+        }
     }
 
     // Terminal test: exercises the constructor/destructor lifecycle —
@@ -214,47 +220,22 @@ fn park() -> ! {
 
 #[derive(Debug)]
 struct Snapshot {
-    setpoints: Setpoints,
-    safety: SafetyLimits,
-    power_on_output: bool,
     output_on: bool,
     temp_unit: TempUnit,
     lock: bool,
     backlight: u8,
     sleep_minutes: u16,
     buzzer: bool,
-    groups: [GroupParams; 10],
+    groups: [[u16; GROUP_REGISTER_COUNT]; GROUP_COUNT],
 }
 
 fn snapshot_all<'d>(xy: &mut T<'d>) -> Result<Snapshot, String> {
-    let mut groups = core::array::from_fn(|_| GroupParams {
-        setpoints: Setpoints {
-            v_set: 0.0,
-            i_set: 0.0,
-        },
-        safety_limits: SafetyLimits {
-            lvp_v: 0.0,
-            ovp_v: 0.0,
-            ocp_a: 0.0,
-        },
-        s_opp_w: 0.0,
-        s_ohp_h: 0,
-        s_ohp_m: 0,
-        s_oah_ah: 0.0,
-        s_owh_wh: 0.0,
-        s_otp: Temperature {
-            value: 0.0,
-            unit: TempUnit::Celsius,
-        },
-        power_on_output: false,
-    });
+    let mut groups = [[0; GROUP_REGISTER_COUNT]; GROUP_COUNT];
     for (n, slot) in groups.iter_mut().enumerate() {
-        *slot = xy.read_group(n as u8).map_err(driver_error)?;
+        xy.read_raw_holding(group_address(n), slot)
+            .map_err(driver_error)?;
     }
     Ok(Snapshot {
-        setpoints: xy.read_setpoints().map_err(driver_error)?,
-        safety: xy.read_protection().map_err(driver_error)?,
-        power_on_output: xy.read_power_on_output().map_err(driver_error)?,
         output_on: xy.read_output().map_err(driver_error)?,
         temp_unit: xy.read_temp_unit().map_err(driver_error)?,
         lock: xy.read_lock().map_err(driver_error)?,
@@ -266,42 +247,216 @@ fn snapshot_all<'d>(xy: &mut T<'d>) -> Result<Snapshot, String> {
 }
 
 fn restore_all<'d>(xy: &mut T<'d>, s: &Snapshot) -> Result<(), String> {
-    // Output OFF before touching setpoints. Caller can re-enable manually.
-    xy.set_output(false).map_err(driver_error)?;
-    // Drop V_SET first so re-applying the original protection (which may
-    // have an OVP below the post-sweep V_SET) isn't rejected.
-    xy.set_voltage(0.0).map_err(driver_error)?;
-    xy.set_current_limit(0.0).map_err(driver_error)?;
-    for (n, g) in s.groups.iter().enumerate() {
-        xy.write_group(n as u8, g).map_err(driver_error)?;
+    xy.set_output(false)
+        .map_err(|e| format!("cannot disable output before restore: {e}"))?;
+    expect_eq(
+        "output before restore",
+        false,
+        xy.read_output().map_err(driver_error)?,
+    )?;
+
+    let mut errors = Vec::new();
+    record_restore(
+        &mut errors,
+        "unlock front panel",
+        xy.set_lock(false).map_err(driver_error),
+    );
+    record_restore(
+        &mut errors,
+        "set V_SET=0",
+        xy.set_voltage(0.0).map_err(driver_error),
+    );
+    record_restore(
+        &mut errors,
+        "set I_SET=0",
+        xy.set_current_limit(0.0).map_err(driver_error),
+    );
+    record_restore(
+        &mut errors,
+        "restore temperature unit",
+        xy.set_temp_unit(s.temp_unit).map_err(driver_error),
+    );
+
+    for n in 1..GROUP_COUNT {
+        restore_group(xy, n, &s.groups[n], &mut errors);
     }
-    xy.set_protection(s.safety).map_err(driver_error)?;
-    xy.set_voltage(s.setpoints.v_set).map_err(driver_error)?;
-    xy.set_current_limit(s.setpoints.i_set)
-        .map_err(driver_error)?;
-    xy.set_power_on_output(s.power_on_output)
-        .map_err(driver_error)?;
-    xy.set_temp_unit(s.temp_unit).map_err(driver_error)?;
-    xy.set_lock(s.lock).map_err(driver_error)?;
-    xy.set_backlight(s.backlight).map_err(driver_error)?;
-    xy.set_sleep_minutes(s.sleep_minutes)
-        .map_err(driver_error)?;
-    xy.set_buzzer(s.buzzer).map_err(driver_error)?;
-    xy.clear_protection_status().map_err(driver_error)?;
+    restore_group(xy, 0, &s.groups[0], &mut errors);
+
+    record_restore(
+        &mut errors,
+        "restore backlight",
+        xy.set_backlight(s.backlight).map_err(driver_error),
+    );
+    record_restore(
+        &mut errors,
+        "restore sleep timeout",
+        xy.set_sleep_minutes(s.sleep_minutes).map_err(driver_error),
+    );
+    record_restore(
+        &mut errors,
+        "restore buzzer",
+        xy.set_buzzer(s.buzzer).map_err(driver_error),
+    );
+    record_restore(
+        &mut errors,
+        "clear protection status",
+        xy.clear_protection_status().map_err(driver_error),
+    );
+    record_restore(
+        &mut errors,
+        "restore lock",
+        xy.set_lock(s.lock).map_err(driver_error),
+    );
+
+    verify_restoration(xy, s, &mut errors);
     if s.output_on {
         warn!("snapshot had output ON — leaving it OFF; re-enable manually if intended");
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn prepare_safe_baseline(xy: &mut T) -> Result<(), String> {
+    xy.set_output(false).map_err(driver_error)?;
+    expect_eq(
+        "safe baseline output",
+        false,
+        xy.read_output().map_err(driver_error)?,
+    )?;
+    xy.set_power_on_output(false).map_err(driver_error)?;
+    expect_eq(
+        "safe baseline power-on output",
+        false,
+        xy.read_power_on_output().map_err(driver_error)?,
+    )?;
+    xy.clear_protection_status().map_err(driver_error)?;
+    xy.set_protection(HEADROOM_SAFETY).map_err(driver_error)
+}
+
+fn group_address(n: usize) -> u16 {
+    debug_assert!(n < GROUP_COUNT);
+    GROUP_BASE + n as u16 * GROUP_STRIDE
+}
+
+fn restore_group(
+    xy: &mut T,
+    n: usize,
+    words: &[u16; GROUP_REGISTER_COUNT],
+    errors: &mut Vec<String>,
+) {
+    if n == 0 {
+        // Restore live protection before V_SET so an OVP crossing cannot trip.
+        for (offset, &word) in words.iter().enumerate().skip(2) {
+            restore_group_word(xy, n, offset, word, errors);
+        }
+        for (offset, &word) in words.iter().enumerate().take(2) {
+            restore_group_word(xy, n, offset, word, errors);
+        }
+    } else {
+        for (offset, &word) in words.iter().enumerate() {
+            restore_group_word(xy, n, offset, word, errors);
+        }
+    }
+}
+
+fn restore_group_exact(
+    xy: &mut T,
+    n: usize,
+    words: &[u16; GROUP_REGISTER_COUNT],
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    restore_group(xy, n, words, &mut errors);
+    let mut actual = [0; GROUP_REGISTER_COUNT];
+    record_restore(
+        &mut errors,
+        &format!("verify restored M{n}"),
+        xy.read_raw_holding(group_address(n), &mut actual)
+            .map_err(driver_error)
+            .and_then(|()| expect_eq(&format!("M{n} raw restore"), *words, actual)),
+    );
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn restore_group_word(xy: &mut T, n: usize, offset: usize, word: u16, errors: &mut Vec<String>) {
+    let label = format!("restore M{n} register +{offset}");
+    record_restore(
+        errors,
+        &label,
+        xy.write_raw_holding(group_address(n) + offset as u16, word)
+            .map_err(driver_error),
+    );
+}
+
+fn verify_restoration(xy: &mut T, s: &Snapshot, errors: &mut Vec<String>) {
+    record_restore(
+        errors,
+        "verify output remains off",
+        xy.read_output()
+            .map_err(driver_error)
+            .and_then(|actual| expect_eq("OUTPUT_EN", false, actual)),
+    );
+    record_restore(
+        errors,
+        "verify temperature unit",
+        xy.read_temp_unit()
+            .map_err(driver_error)
+            .and_then(|actual| expect_eq("F-C", s.temp_unit, actual)),
+    );
+    record_restore(
+        errors,
+        "verify lock",
+        xy.read_lock()
+            .map_err(driver_error)
+            .and_then(|actual| expect_eq("LOCK", s.lock, actual)),
+    );
+    record_restore(
+        errors,
+        "verify backlight",
+        xy.read_backlight()
+            .map_err(driver_error)
+            .and_then(|actual| expect_eq("B-LED", s.backlight, actual)),
+    );
+    record_restore(
+        errors,
+        "verify sleep timeout",
+        xy.read_sleep_minutes()
+            .map_err(driver_error)
+            .and_then(|actual| expect_eq("SLEEP", s.sleep_minutes, actual)),
+    );
+    record_restore(
+        errors,
+        "verify buzzer",
+        xy.read_buzzer()
+            .map_err(driver_error)
+            .and_then(|actual| expect_eq("BUZZER", s.buzzer, actual)),
+    );
+    for n in 0..GROUP_COUNT {
+        let mut actual = [0; GROUP_REGISTER_COUNT];
+        let result = xy
+            .read_raw_holding(group_address(n), &mut actual)
+            .map_err(driver_error)
+            .and_then(|()| expect_eq(&format!("M{n} raw snapshot"), s.groups[n], actual));
+        record_restore(errors, &format!("verify M{n}"), result);
+    }
+}
+
+fn record_restore(errors: &mut Vec<String>, label: &str, result: Result<(), String>) {
+    if let Err(error) = result {
+        errors.push(format!("{label}: {error}"));
+    }
 }
 
 type T<'d> = Xy<xy_modbus::esp_idf::EspIdfTransport<'d>>;
 
 fn driver_error(e: impl core::fmt::Display) -> String {
     format!("driver: {e}")
-}
-
-fn approx(a: f32, b: f32) -> bool {
-    (a - b).abs() < 0.02
 }
 
 fn expect_eq<X: PartialEq + core::fmt::Debug>(
@@ -317,7 +472,15 @@ fn expect_eq<X: PartialEq + core::fmt::Debug>(
 }
 
 fn expect_approx(name: &str, expected: f32, actual: f32) -> Result<(), String> {
-    if approx(expected, actual) {
+    if (expected - actual).abs() < 0.02 {
+        Ok(())
+    } else {
+        Err(format!("{name}: expected {expected:.3}, got {actual:.3}"))
+    }
+}
+
+fn expect_precise(name: &str, expected: f32, actual: f32) -> Result<(), String> {
+    if (expected - actual).abs() < 0.000_1 {
         Ok(())
     } else {
         Err(format!("{name}: expected {expected:.3}, got {actual:.3}"))
@@ -330,6 +493,22 @@ fn expect_approx64(name: &str, expected: f64, actual: f64) -> Result<(), String>
     } else {
         Err(format!("{name}: expected {expected:.5}, got {actual:.5}"))
     }
+}
+
+fn finish_with_cleanup(
+    result: Result<(), String>,
+    cleanup: Result<(), String>,
+    cleanup_name: &str,
+) -> Result<(), String> {
+    if let Err(cleanup_error) = cleanup {
+        return match result {
+            Ok(()) => Err(format!("{cleanup_name}: {cleanup_error}")),
+            Err(test_error) => Err(format!(
+                "{test_error}; {cleanup_name} also failed: {cleanup_error}"
+            )),
+        };
+    }
+    result
 }
 
 fn test_identity(xy: &mut T) -> Result<(), String> {
@@ -391,6 +570,30 @@ fn test_status_consistency(xy: &mut T) -> Result<(), String> {
 
 fn test_totals(xy: &mut T) -> Result<(), String> {
     let t = xy.read_totals().map_err(driver_error)?;
+    let mut raw = [0u16; 7];
+    xy.read_raw_holding(0x0006, &mut raw)
+        .map_err(driver_error)?;
+    let charge_raw = ((raw[1] as u32) << 16) | raw[0] as u32;
+    let energy_raw = ((raw[3] as u32) << 16) | raw[2] as u32;
+    expect_eq(
+        "total charge decode",
+        charge_raw as f64 / 1000.0,
+        t.charge_ah,
+    )?;
+    expect_eq(
+        "total energy decode",
+        energy_raw as f64 / 1000.0,
+        t.energy_wh,
+    )?;
+    expect_eq("on-time hours", raw[4], t.on_time.hours)?;
+    expect_eq("on-time minutes", raw[5], t.on_time.minutes)?;
+    expect_eq("on-time seconds", raw[6], t.on_time.seconds)?;
+    let expected_seconds = raw[4] as u32 * 3600 + raw[5] as u32 * 60 + raw[6] as u32;
+    expect_eq(
+        "on-time total seconds",
+        expected_seconds,
+        t.on_time.total_seconds(),
+    )?;
     info!(
         "  totals: charge={:.3} Ah, energy={:.3} Wh, on_time={}h{}m{}s ({}s)",
         t.charge_ah,
@@ -407,10 +610,10 @@ fn test_voltage_sweep(xy: &mut T) -> Result<(), String> {
     for &v in V_SET_SAMPLES {
         xy.set_voltage(v).map_err(driver_error)?;
         let got = xy.read_setpoints().map_err(driver_error)?.v_set;
-        expect_approx(&format!("V_SET={v:.2}"), v, got)?;
+        expect_precise(&format!("V_SET={v:.2}"), v, got)?;
         // Also verify status agrees.
         let s = xy.read_status().map_err(driver_error)?;
-        expect_approx(&format!("V_SET={v:.2} via status"), v, s.setpoints.v_set)?;
+        expect_precise(&format!("V_SET={v:.2} via status"), v, s.setpoints.v_set)?;
     }
     info!("  swept {} V values", V_SET_SAMPLES.len());
     Ok(())
@@ -420,7 +623,7 @@ fn test_current_sweep(xy: &mut T) -> Result<(), String> {
     for &i in I_SET_SAMPLES {
         xy.set_current_limit(i).map_err(driver_error)?;
         let got = xy.read_setpoints().map_err(driver_error)?.i_set;
-        expect_approx(&format!("I_SET={i:.2}"), i, got)?;
+        expect_precise(&format!("I_SET={i:.2}"), i, got)?;
     }
     info!("  swept {} I values", I_SET_SAMPLES.len());
     Ok(())
@@ -434,9 +637,9 @@ fn test_protection_sweep(xy: &mut T) -> Result<(), String> {
     for s in PROT_SAMPLES {
         xy.set_protection(*s).map_err(driver_error)?;
         let got = xy.read_protection().map_err(driver_error)?;
-        expect_approx(&format!("LVP@{:?}", s), s.lvp_v, got.lvp_v)?;
-        expect_approx(&format!("OVP@{:?}", s), s.ovp_v, got.ovp_v)?;
-        expect_approx(&format!("OCP@{:?}", s), s.ocp_a, got.ocp_a)?;
+        expect_precise(&format!("LVP@{:?}", s), s.lvp_v, got.lvp_v)?;
+        expect_precise(&format!("OVP@{:?}", s), s.ovp_v, got.ovp_v)?;
+        expect_precise(&format!("OCP@{:?}", s), s.ocp_a, got.ocp_a)?;
     }
     // Restore a wide-open headroom for downstream tests.
     xy.set_protection(HEADROOM_SAFETY).map_err(driver_error)?;
@@ -459,36 +662,51 @@ fn test_output_enable_disable(xy: &mut T) -> Result<(), String> {
     xy.set_current_limit(0.0).map_err(driver_error)?;
     xy.clear_protection_status().map_err(driver_error)?;
 
-    xy.set_output(true).map_err(driver_error)?;
-    thread::sleep(Duration::from_millis(100));
-    let on = xy.read_output().map_err(driver_error)?;
-    let s_on = xy.read_status().map_err(driver_error)?;
-    expect_eq("OUTPUT_EN after enable", true, on)?;
-    expect_eq("status.output_on after enable", true, s_on.output_on)?;
-    info!(
-        "  output ON: V_OUT={:.2} I_OUT={:.3}",
-        s_on.v_out, s_on.i_out
-    );
+    let result = (|| {
+        xy.set_output(true).map_err(driver_error)?;
+        thread::sleep(Duration::from_millis(100));
+        let on = xy.read_output().map_err(driver_error)?;
+        let s_on = xy.read_status().map_err(driver_error)?;
+        expect_eq("OUTPUT_EN after enable", true, on)?;
+        expect_eq("status.output_on after enable", true, s_on.output_on)?;
+        info!(
+            "  output ON: V_OUT={:.2} I_OUT={:.3}",
+            s_on.v_out, s_on.i_out
+        );
 
-    xy.set_output(false).map_err(driver_error)?;
-    thread::sleep(Duration::from_millis(100));
-    let off = xy.read_output().map_err(driver_error)?;
-    let s_off = xy.read_status().map_err(driver_error)?;
-    expect_eq("OUTPUT_EN after disable", false, off)?;
-    expect_eq("status.output_on after disable", false, s_off.output_on)
+        xy.set_output(false).map_err(driver_error)?;
+        thread::sleep(Duration::from_millis(100));
+        let off = xy.read_output().map_err(driver_error)?;
+        let s_off = xy.read_status().map_err(driver_error)?;
+        expect_eq("OUTPUT_EN after disable", false, off)?;
+        expect_eq("status.output_on after disable", false, s_off.output_on)
+    })();
+    let cleanup = xy
+        .set_output(false)
+        .map_err(driver_error)
+        .and_then(|()| xy.read_output().map_err(driver_error))
+        .and_then(|actual| expect_eq("OUTPUT_EN cleanup", false, actual));
+    finish_with_cleanup(result, cleanup, "output cleanup")
 }
 
 fn test_power_on_output(xy: &mut T) -> Result<(), String> {
-    let original = xy.read_power_on_output().map_err(driver_error)?;
-    for v in [!original, original, true, false, true, false] {
-        xy.set_power_on_output(v).map_err(driver_error)?;
-        expect_eq(
-            "S_INI round-trip",
-            v,
-            xy.read_power_on_output().map_err(driver_error)?,
-        )?;
-    }
-    Ok(())
+    let result = (|| {
+        for value in [true, false] {
+            xy.set_power_on_output(value).map_err(driver_error)?;
+            expect_eq(
+                "S_INI round-trip",
+                value,
+                xy.read_power_on_output().map_err(driver_error)?,
+            )?;
+        }
+        Ok(())
+    })();
+    let cleanup = xy
+        .set_power_on_output(false)
+        .map_err(driver_error)
+        .and_then(|()| xy.read_power_on_output().map_err(driver_error))
+        .and_then(|actual| expect_eq("S_INI cleanup", false, actual));
+    finish_with_cleanup(result, cleanup, "power-on-output cleanup")
 }
 
 fn test_reg_mode(xy: &mut T) -> Result<(), String> {
@@ -499,17 +717,17 @@ fn test_reg_mode(xy: &mut T) -> Result<(), String> {
 
 fn test_internal_temperature(xy: &mut T) -> Result<(), String> {
     let t = xy.read_temperature_internal().map_err(driver_error)?;
+    expect_eq(
+        "T_INT unit",
+        xy.read_temp_unit().map_err(driver_error)?,
+        t.unit,
+    )?;
     info!("  T_INT={:.1} {:?}", t.value, t.unit);
     Ok(())
 }
 
 fn test_temp_unit(xy: &mut T) -> Result<(), String> {
-    for u in [
-        TempUnit::Celsius,
-        TempUnit::Fahrenheit,
-        TempUnit::Celsius,
-        TempUnit::Fahrenheit,
-    ] {
+    for u in [TempUnit::Celsius, TempUnit::Fahrenheit] {
         xy.set_temp_unit(u).map_err(driver_error)?;
         expect_eq("F-C", u, xy.read_temp_unit().map_err(driver_error)?)?;
     }
@@ -522,12 +740,25 @@ fn test_temp_offsets_read_only(xy: &mut T) -> Result<(), String> {
     // probe below covers the firmware no-op behavior at the wire level.
     let int_off = xy.read_temp_offset_internal().map_err(driver_error)?;
     let ext_off = xy.read_temp_offset_external().map_err(driver_error)?;
+    let mut raw = [0u16; 2];
+    xy.read_raw_holding(0x001A, &mut raw)
+        .map_err(driver_error)?;
+    expect_precise(
+        "T_INT_OFFSET raw decode",
+        raw[0] as i16 as f32 / 10.0,
+        int_off,
+    )?;
+    expect_precise(
+        "T_EXT_OFFSET raw decode",
+        raw[1] as i16 as f32 / 10.0,
+        ext_off,
+    )?;
     info!("  T_INT_OFFSET={int_off:.1} T_EXT_OFFSET={ext_off:.1}");
     Ok(())
 }
 
 fn test_lock(xy: &mut T) -> Result<(), String> {
-    for v in [true, false, true, false] {
+    for v in [true, false] {
         xy.set_lock(v).map_err(driver_error)?;
         expect_eq("LOCK", v, xy.read_lock().map_err(driver_error)?)?;
     }
@@ -578,7 +809,7 @@ fn test_sleep_minutes_sweep(xy: &mut T) -> Result<(), String> {
 }
 
 fn test_buzzer(xy: &mut T) -> Result<(), String> {
-    for v in [true, false, true, false] {
+    for v in [true, false] {
         xy.set_buzzer(v).map_err(driver_error)?;
         expect_eq("BUZZER", v, xy.read_buzzer().map_err(driver_error)?)?;
     }
@@ -596,8 +827,11 @@ fn test_comms_settings(xy: &mut T) -> Result<(), String> {
             "SLAVE mismatch: device 0x{slave:02X}, transport assumes 0x01"
         ));
     }
-    if !matches!(baud, BaudRate::B115200) {
-        warn!("  device baud is {baud:?}, not B115200 — UART would normally be misconfigured");
+    if baud.baud() != BAUD {
+        return Err(format!(
+            "BAUD mismatch: register reports {} but UART is configured for {BAUD}",
+            baud.baud()
+        ));
     }
     Ok(())
 }
@@ -640,18 +874,11 @@ fn test_lifecycle(xy: T<'static>) -> Result<(), String> {
     Ok(())
 }
 
-/// Empirical probe to settle the S-OTP scale ambiguity. Bypasses the
-/// driver's fixed-point conversion and writes raw register values
-/// directly so we can see exactly what the firmware accepts/clamps.
-///
-/// Pre-conditions: temp unit set to Celsius (eliminates the F/C confound
-/// during interpretation). M0's S-OTP raw value is snapshotted and
-/// restored at the end.
+/// Verifies the empirically established scale-1 S-OTP behavior through
+/// single-register writes, which bypass group-write conversion and clamps.
 fn test_s_otp_raw_probe(xy: &mut T) -> Result<(), String> {
     const REG_S_OTP_M0: u16 = 0x005C;
 
-    // Capture the unit the device was *originally* in — the snapshot's
-    // s_otp raw must be interpreted in that unit.
     let original_unit = xy.read_temp_unit().map_err(driver_error)?;
     info!("  device unit at probe start: {original_unit:?}");
 
@@ -663,37 +890,38 @@ fn test_s_otp_raw_probe(xy: &mut T) -> Result<(), String> {
         original[0]
     );
 
-    // Cover the full plausible range: tiny, mid, datasheet default,
-    // datasheet max, and several over-max values to learn the clamp.
     let probes: &[u16] = &[10, 50, 80, 95, 100, 110, 150, 200, 230, 500, 950, 1100];
 
-    for unit in [TempUnit::Celsius, TempUnit::Fahrenheit] {
-        xy.set_temp_unit(unit).map_err(driver_error)?;
-        info!("  --- probing in {unit:?} ---");
-        for &raw in probes {
-            xy.write_raw_holding(REG_S_OTP_M0, raw)
-                .map_err(driver_error)?;
-            let mut got = [0u16; 1];
-            xy.read_raw_holding(REG_S_OTP_M0, &mut got)
-                .map_err(driver_error)?;
-            info!("    S-OTP write raw {raw:>4} -> read raw {}", got[0]);
+    let result = (|| {
+        for unit in [TempUnit::Celsius, TempUnit::Fahrenheit] {
+            xy.set_temp_unit(unit).map_err(driver_error)?;
+            info!("  --- probing in {unit:?} ---");
+            for &raw in probes {
+                xy.write_raw_holding(REG_S_OTP_M0, raw)
+                    .map_err(driver_error)?;
+                let mut got = [0u16; 1];
+                xy.read_raw_holding(REG_S_OTP_M0, &mut got)
+                    .map_err(driver_error)?;
+                expect_eq(&format!("S-OTP {unit:?} raw {raw}"), raw, got[0])?;
+                info!("    S-OTP write raw {raw:>4} -> read raw {}", got[0]);
+            }
         }
-    }
+        Ok(())
+    })();
 
-    // Restore unit and raw.
-    xy.set_temp_unit(original_unit).map_err(driver_error)?;
-    xy.write_raw_holding(REG_S_OTP_M0, original[0])
-        .map_err(driver_error)?;
-    let mut verify = [0u16; 1];
-    xy.read_raw_holding(REG_S_OTP_M0, &mut verify)
-        .map_err(driver_error)?;
-    expect_eq("S-OTP restore", original[0], verify[0])
+    let cleanup = (|| {
+        xy.set_temp_unit(original_unit).map_err(driver_error)?;
+        xy.write_raw_holding(REG_S_OTP_M0, original[0])
+            .map_err(driver_error)?;
+        let mut verify = [0u16; 1];
+        xy.read_raw_holding(REG_S_OTP_M0, &mut verify)
+            .map_err(driver_error)?;
+        expect_eq("S-OTP restore", original[0], verify[0])
+    })();
+    finish_with_cleanup(result, cleanup, "S-OTP cleanup")
 }
 
-/// Probe the raw scale/range of T-IN-OFFSET. Driver currently uses
-/// scale=10 (i.e. 0.1° units). If raw 1 round-trips, scale=10 is right
-/// and firmware just rounds 0.1° to "1 sub-unit". If raw 1 reads back
-/// as 0, the firmware doesn't accept sub-degree resolution.
+/// Verifies that XY7025 firmware ignores Modbus writes to T-IN-OFFSET.
 fn test_temp_offset_raw_probe(xy: &mut T) -> Result<(), String> {
     const REG_T_IN_OFFSET: u16 = 0x001A;
     let mut original = [0u16; 1];
@@ -702,23 +930,35 @@ fn test_temp_offset_raw_probe(xy: &mut T) -> Result<(), String> {
     info!("  T-IN-OFFSET raw original = {}", original[0]);
 
     let probes: &[u16] = &[0, 1, 2, 5, 10, 50, 100];
-    for &raw in probes {
-        xy.write_raw_holding(REG_T_IN_OFFSET, raw)
-            .map_err(driver_error)?;
-        let mut got = [0u16; 1];
-        xy.read_raw_holding(REG_T_IN_OFFSET, &mut got)
-            .map_err(driver_error)?;
-        info!("    T-IN-OFFSET write raw {raw:>3} -> read raw {}", got[0]);
-    }
+    let result = (|| {
+        for &raw in probes {
+            xy.write_raw_holding(REG_T_IN_OFFSET, raw)
+                .map_err(driver_error)?;
+            let mut got = [0u16; 1];
+            xy.read_raw_holding(REG_T_IN_OFFSET, &mut got)
+                .map_err(driver_error)?;
+            expect_eq(
+                &format!("T-IN-OFFSET ignored raw {raw}"),
+                original[0],
+                got[0],
+            )?;
+            info!("    T-IN-OFFSET write raw {raw:>3} -> read raw {}", got[0]);
+        }
+        Ok(())
+    })();
 
-    xy.write_raw_holding(REG_T_IN_OFFSET, original[0])
-        .map_err(driver_error)?;
-    Ok(())
+    let cleanup = (|| {
+        xy.write_raw_holding(REG_T_IN_OFFSET, original[0])
+            .map_err(driver_error)?;
+        let mut verify = [0u16; 1];
+        xy.read_raw_holding(REG_T_IN_OFFSET, &mut verify)
+            .map_err(driver_error)?;
+        expect_eq("T-IN-OFFSET restore", original[0], verify[0])
+    })();
+    finish_with_cleanup(result, cleanup, "T-IN-OFFSET cleanup")
 }
 
-/// Probe the raw range of SLEEP. Failure mode in earlier runs was
-/// "write 10/15, read back 9". Either firmware caps at 9, or there's
-/// some encoding quirk.
+/// Verifies the empirically established nine-minute SLEEP ceiling.
 fn test_sleep_raw_probe(xy: &mut T) -> Result<(), String> {
     const REG_SLEEP: u16 = 0x0015;
     let mut original = [0u16; 1];
@@ -727,18 +967,28 @@ fn test_sleep_raw_probe(xy: &mut T) -> Result<(), String> {
     info!("  SLEEP raw original = {}", original[0]);
 
     let probes: &[u16] = &[0, 1, 5, 8, 9, 10, 11, 15, 30, 60, 100, 999];
-    for &raw in probes {
-        xy.write_raw_holding(REG_SLEEP, raw).map_err(driver_error)?;
-        thread::sleep(Duration::from_millis(50));
-        let mut got = [0u16; 1];
-        xy.read_raw_holding(REG_SLEEP, &mut got)
-            .map_err(driver_error)?;
-        info!("    SLEEP write raw {raw:>3} -> read raw {}", got[0]);
-    }
+    let result = (|| {
+        for &raw in probes {
+            xy.write_raw_holding(REG_SLEEP, raw).map_err(driver_error)?;
+            thread::sleep(Duration::from_millis(50));
+            let mut got = [0u16; 1];
+            xy.read_raw_holding(REG_SLEEP, &mut got)
+                .map_err(driver_error)?;
+            expect_eq(&format!("SLEEP raw {raw}"), raw.min(9), got[0])?;
+            info!("    SLEEP write raw {raw:>3} -> read raw {}", got[0]);
+        }
+        Ok(())
+    })();
 
-    xy.write_raw_holding(REG_SLEEP, original[0])
-        .map_err(driver_error)?;
-    Ok(())
+    let cleanup = (|| {
+        xy.write_raw_holding(REG_SLEEP, original[0])
+            .map_err(driver_error)?;
+        let mut verify = [0u16; 1];
+        xy.read_raw_holding(REG_SLEEP, &mut verify)
+            .map_err(driver_error)?;
+        expect_eq("SLEEP restore", original[0], verify[0])
+    })();
+    finish_with_cleanup(result, cleanup, "SLEEP cleanup")
 }
 
 fn test_group_full_round_trip_all(xy: &mut T) -> Result<(), String> {
@@ -747,7 +997,9 @@ fn test_group_full_round_trip_all(xy: &mut T) -> Result<(), String> {
     xy.set_temp_unit(TempUnit::Celsius).map_err(driver_error)?;
     // Write a unique probe to every M0..=M9, read back, verify, restore.
     for n in 0u8..=9 {
-        let original = xy.read_group(n).map_err(driver_error)?;
+        let mut original = [0; GROUP_REGISTER_COUNT];
+        xy.read_raw_holding(group_address(n as usize), &mut original)
+            .map_err(driver_error)?;
         let probe = GroupParams {
             setpoints: Setpoints {
                 v_set: 5.0 + n as f32 * 0.5,
@@ -767,73 +1019,86 @@ fn test_group_full_round_trip_all(xy: &mut T) -> Result<(), String> {
                 value: 50.0 + n as f32,
                 unit: TempUnit::Celsius,
             },
-            power_on_output: n % 2 == 0,
+            // M0 remains boot-safe; non-active groups still cover both values.
+            power_on_output: n != 0 && n % 2 == 0,
         };
-        let r = xy.write_group(n, &probe).map_err(driver_error)?;
-        expect_approx(
-            &format!("M{n} v_set"),
-            probe.setpoints.v_set,
-            r.setpoints.v_set,
-        )?;
-        expect_approx(
-            &format!("M{n} i_set"),
-            probe.setpoints.i_set,
-            r.setpoints.i_set,
-        )?;
-        expect_approx(
-            &format!("M{n} s_lvp_v"),
-            probe.safety_limits.lvp_v,
-            r.safety_limits.lvp_v,
-        )?;
-        expect_approx(
-            &format!("M{n} s_ovp_v"),
-            probe.safety_limits.ovp_v,
-            r.safety_limits.ovp_v,
-        )?;
-        expect_approx(
-            &format!("M{n} s_ocp_a"),
-            probe.safety_limits.ocp_a,
-            r.safety_limits.ocp_a,
-        )?;
-        expect_approx(&format!("M{n} s_opp_w"), probe.s_opp_w, r.s_opp_w)?;
-        expect_eq(&format!("M{n} s_ohp_h"), probe.s_ohp_h, r.s_ohp_h)?;
-        expect_eq(&format!("M{n} s_ohp_m"), probe.s_ohp_m, r.s_ohp_m)?;
-        expect_approx64(&format!("M{n} s_oah_ah"), probe.s_oah_ah, r.s_oah_ah)?;
-        expect_approx64(&format!("M{n} s_owh_wh"), probe.s_owh_wh, r.s_owh_wh)?;
-        // Group writes route through firmware unit conversion, which
-        // introduces ±1° rounding. Single-register writes round-trip
-        // exactly (see s_otp_raw_probe). Allow a 2° tolerance here.
-        expect_eq(&format!("M{n} s_otp unit"), probe.s_otp.unit, r.s_otp.unit)?;
-        if (probe.s_otp.value - r.s_otp.value).abs() > 2.0 {
-            return Err(format!(
-                "M{n} s_otp: expected {:.1} ±2, got {:.1}",
-                probe.s_otp.value, r.s_otp.value
-            ));
-        }
-        expect_eq(
-            &format!("M{n} power_on_output"),
-            probe.power_on_output,
-            r.power_on_output,
-        )?;
-        // Restore immediately so a later failure doesn't leave M0..M9 trashed.
-        xy.write_group(n, &original).map_err(driver_error)?;
+        let result = (|| {
+            let r = xy.write_group(n, &probe).map_err(driver_error)?;
+            expect_precise(
+                &format!("M{n} v_set"),
+                probe.setpoints.v_set,
+                r.setpoints.v_set,
+            )?;
+            expect_precise(
+                &format!("M{n} i_set"),
+                probe.setpoints.i_set,
+                r.setpoints.i_set,
+            )?;
+            expect_precise(
+                &format!("M{n} s_lvp_v"),
+                probe.safety_limits.lvp_v,
+                r.safety_limits.lvp_v,
+            )?;
+            expect_precise(
+                &format!("M{n} s_ovp_v"),
+                probe.safety_limits.ovp_v,
+                r.safety_limits.ovp_v,
+            )?;
+            expect_precise(
+                &format!("M{n} s_ocp_a"),
+                probe.safety_limits.ocp_a,
+                r.safety_limits.ocp_a,
+            )?;
+            expect_precise(&format!("M{n} s_opp_w"), probe.s_opp_w, r.s_opp_w)?;
+            expect_eq(&format!("M{n} s_ohp_h"), probe.s_ohp_h, r.s_ohp_h)?;
+            expect_eq(&format!("M{n} s_ohp_m"), probe.s_ohp_m, r.s_ohp_m)?;
+            expect_approx64(&format!("M{n} s_oah_ah"), probe.s_oah_ah, r.s_oah_ah)?;
+            expect_approx64(&format!("M{n} s_owh_wh"), probe.s_owh_wh, r.s_owh_wh)?;
+            // Group writes route through firmware unit conversion, which
+            // introduces ±1° rounding. Single-register writes round-trip
+            // exactly (see s_otp_raw_probe).
+            expect_eq(&format!("M{n} s_otp unit"), probe.s_otp.unit, r.s_otp.unit)?;
+            if (probe.s_otp.value - r.s_otp.value).abs() > 1.0 {
+                return Err(format!(
+                    "M{n} s_otp: expected {:.1} ±1, got {:.1}",
+                    probe.s_otp.value, r.s_otp.value
+                ));
+            }
+            expect_eq(
+                &format!("M{n} power_on_output"),
+                probe.power_on_output,
+                r.power_on_output,
+            )
+        })();
+        let cleanup = restore_group_exact(xy, n as usize, &original);
+        finish_with_cleanup(result, cleanup, &format!("M{n} cleanup"))?;
     }
     info!("  exercised all 10 memory groups");
     Ok(())
 }
 
 fn test_recall_each_group(xy: &mut T) -> Result<(), String> {
-    // Recall overwrites V_SET / I_SET / protection. Keep output OFF and
-    // re-apply HEADROOM_SAFETY between recalls so a group with a tight
-    // OVP doesn't break the next iteration's V sweep prerequisites.
+    // Recall overwrites the live M0 set, so keep the output off and lower
+    // V_SET before comparing the recalled raw words.
     xy.set_output(false).map_err(driver_error)?;
     for n in 0u8..=9 {
-        // Lower V_SET first so the recalled group's OVP can't be below
-        // the live setpoint and reject the write.
         xy.set_voltage(0.0).map_err(driver_error)?;
-        xy.recall_group(n).map_err(driver_error)?;
-        let _ = xy.read_setpoints().map_err(driver_error)?;
-        xy.set_protection(HEADROOM_SAFETY).map_err(driver_error)?;
+        let mut expected = [0; GROUP_REGISTER_COUNT];
+        xy.read_raw_holding(group_address(n as usize), &mut expected)
+            .map_err(driver_error)?;
+        let result = (|| {
+            xy.recall_group(n).map_err(driver_error)?;
+            let mut actual = [0; GROUP_REGISTER_COUNT];
+            xy.read_raw_holding(GROUP_BASE, &mut actual)
+                .map_err(driver_error)?;
+            expect_eq(&format!("recall M{n} into M0"), expected, actual)
+        })();
+        let cleanup = xy
+            .set_power_on_output(false)
+            .map_err(driver_error)
+            .and_then(|()| xy.read_power_on_output().map_err(driver_error))
+            .and_then(|actual| expect_eq("recalled S_INI cleanup", false, actual));
+        finish_with_cleanup(result, cleanup, &format!("recall M{n} cleanup"))?;
     }
     info!("  recalled all 10 memory groups");
     Ok(())

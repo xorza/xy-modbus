@@ -75,8 +75,8 @@ off until verification passes, etc.).
 - [`DATASHEET.md`](DATASHEET.md) — full register map, CRC algorithm,
   wire-level examples, known firmware quirks.
 - [ESP32-C6 hardware test](https://github.com/xorza/xy-modbus/tree/master/examples/esp32c6-test)
-  — on-device 26-test sweep against a real XY7025 over UART, snapshots and
-  restores every writable register.
+  — on-device 25-test sweep against a real XY7025 over UART, with exact
+  persistent-configuration restoration and a fail-closed output policy.
 - API reference on [docs.rs](https://docs.rs/xy-modbus).
 
 ## License
