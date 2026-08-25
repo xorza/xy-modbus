@@ -25,14 +25,14 @@ use esp_idf_hal::uart::config::Config;
 use esp_idf_hal::units::Hertz;
 
 use xy_modbus::regs;
-use xy_modbus::regs::Reg;
+use xy_modbus::regs::{Group, Reg};
 use xy_modbus::{
     GroupParams, ProtectionStatus, SafetyLimits, ScaleCheck, Setpoints, TempUnit, Temperature, Xy,
 };
 
 const BAUD: u32 = 115200;
-/// Group count as an array length; the crate types it as a `u8` register value.
-const GROUP_COUNT: usize = regs::GROUP_COUNT as usize;
+/// Group count as an array length.
+const GROUP_COUNT: usize = Group::ALL.len();
 
 // Hand copy of `device::input_spec`, which is private: V_OUT 0–70 V,
 // I_OUT 0–25 A at 0.01 resolution; OVP 0–72, OCP 0–27, OPP 0–2000, LVP 10–95,
@@ -228,13 +228,13 @@ struct Snapshot {
     backlight: u8,
     sleep_minutes: u16,
     buzzer: bool,
-    groups: [[u16; regs::GROUP_LEN]; GROUP_COUNT],
+    groups: [[u16; Group::LEN]; GROUP_COUNT],
 }
 
 fn snapshot_all<'d>(xy: &mut T<'d>) -> Result<Snapshot, String> {
-    let mut groups = [[0; regs::GROUP_LEN]; GROUP_COUNT];
-    for (n, slot) in groups.iter_mut().enumerate() {
-        xy.read_raw_holding(regs::group_addr(n as u8), slot)
+    let mut groups = [[0; Group::LEN]; GROUP_COUNT];
+    for (group, slot) in Group::ALL.iter().zip(groups.iter_mut()) {
+        xy.read_raw_holding(group.addr(), slot)
             .map_err(driver_error)?;
     }
     Ok(Snapshot {
@@ -338,7 +338,7 @@ fn prepare_safe_baseline(xy: &mut T) -> Result<(), String> {
     xy.set_protection(HEADROOM_SAFETY).map_err(driver_error)
 }
 
-fn restore_group(xy: &mut T, n: usize, words: &[u16; regs::GROUP_LEN], errors: &mut Vec<String>) {
+fn restore_group(xy: &mut T, n: usize, words: &[u16; Group::LEN], errors: &mut Vec<String>) {
     if n == 0 {
         // Restore live protection before V_SET so an OVP crossing cannot trip.
         for (offset, &word) in words.iter().enumerate().skip(2) {
@@ -354,14 +354,14 @@ fn restore_group(xy: &mut T, n: usize, words: &[u16; regs::GROUP_LEN], errors: &
     }
 }
 
-fn restore_group_exact(xy: &mut T, n: usize, words: &[u16; regs::GROUP_LEN]) -> Result<(), String> {
+fn restore_group_exact(xy: &mut T, n: usize, words: &[u16; Group::LEN]) -> Result<(), String> {
     let mut errors = Vec::new();
     restore_group(xy, n, words, &mut errors);
-    let mut actual = [0; regs::GROUP_LEN];
+    let mut actual = [0; Group::LEN];
     record_restore(
         &mut errors,
         &format!("verify restored M{n}"),
-        xy.read_raw_holding(regs::group_addr(n as u8), &mut actual)
+        xy.read_raw_holding(Group::ALL[n].addr(), &mut actual)
             .map_err(driver_error)
             .and_then(|()| expect_eq(&format!("M{n} raw restore"), *words, actual)),
     );
@@ -377,7 +377,7 @@ fn restore_group_word(xy: &mut T, n: usize, offset: usize, word: u16, errors: &m
     record_restore(
         errors,
         &label,
-        xy.write_raw_holding(regs::group_addr(n as u8) + offset as u16, word)
+        xy.write_raw_holding(Group::ALL[n].addr() + offset as u16, word)
             .map_err(driver_error),
     );
 }
@@ -426,9 +426,9 @@ fn verify_restoration(xy: &mut T, s: &Snapshot, errors: &mut Vec<String>) {
             .and_then(|actual| expect_eq("BUZZER", s.buzzer, actual)),
     );
     for n in 0..GROUP_COUNT {
-        let mut actual = [0; regs::GROUP_LEN];
+        let mut actual = [0; Group::LEN];
         let result = xy
-            .read_raw_holding(regs::group_addr(n as u8), &mut actual)
+            .read_raw_holding(Group::ALL[n].addr(), &mut actual)
             .map_err(driver_error)
             .and_then(|()| expect_eq(&format!("M{n} raw snapshot"), s.groups[n], actual));
         record_restore(errors, &format!("verify M{n}"), result);
@@ -954,9 +954,10 @@ fn test_group_full_round_trip_all(xy: &mut T) -> Result<(), String> {
     // contaminate the s_otp readback comparison.
     xy.set_temp_unit(TempUnit::Celsius).map_err(driver_error)?;
     // Write a unique probe to every M0..=M9, read back, verify, restore.
-    for n in 0u8..=9 {
-        let mut original = [0; regs::GROUP_LEN];
-        xy.read_raw_holding(regs::group_addr(n), &mut original)
+    for group in Group::ALL {
+        let n = group.index();
+        let mut original = [0; Group::LEN];
+        xy.read_raw_holding(group.addr(), &mut original)
             .map_err(driver_error)?;
         let probe = GroupParams {
             setpoints: Setpoints {
@@ -981,7 +982,7 @@ fn test_group_full_round_trip_all(xy: &mut T) -> Result<(), String> {
             power_on_output: n != 0 && n % 2 == 0,
         };
         let result = (|| {
-            let r = xy.write_group(n, &probe).map_err(driver_error)?;
+            let r = xy.write_group(group, &probe).map_err(driver_error)?;
             expect_precise(
                 &format!("M{n} v_set"),
                 probe.setpoints.v_set,
@@ -1039,15 +1040,16 @@ fn test_recall_each_group(xy: &mut T) -> Result<(), String> {
     // Recall overwrites the live M0 set, so keep the output off and lower
     // V_SET before comparing the recalled raw words.
     xy.set_output(false).map_err(driver_error)?;
-    for n in 0u8..=9 {
+    for group in Group::ALL {
+        let n = group.index();
         xy.set_voltage(0.0).map_err(driver_error)?;
-        let mut expected = [0; regs::GROUP_LEN];
-        xy.read_raw_holding(regs::group_addr(n), &mut expected)
+        let mut expected = [0; Group::LEN];
+        xy.read_raw_holding(group.addr(), &mut expected)
             .map_err(driver_error)?;
         let result = (|| {
-            xy.recall_group(n).map_err(driver_error)?;
-            let mut actual = [0; regs::GROUP_LEN];
-            xy.read_raw_holding(regs::GROUP_BASE, &mut actual)
+            xy.recall_group(group).map_err(driver_error)?;
+            let mut actual = [0; Group::LEN];
+            xy.read_raw_holding(Group::BASE, &mut actual)
                 .map_err(driver_error)?;
             expect_eq(&format!("recall M{n} into M0"), expected, actual)
         })();

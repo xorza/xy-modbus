@@ -84,7 +84,7 @@ pub struct RegSpec {
 ///
 /// The `S*` variants are the *active* group (M0) copies, which are the live
 /// operating set. Every other memory group stores the same words at
-/// [`group_addr`]`(n)` — see [`GROUP_WORDS`].
+/// [`Group::addr`] — see [`Group::WORDS`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Reg {
@@ -327,58 +327,115 @@ impl Reg {
     }
 }
 
-/// Base register address of memory group M0 — the live operating set.
-pub const GROUP_BASE: u16 = 0x0050;
-/// Address distance between consecutive memory groups.
-pub const GROUP_STRIDE: u16 = 0x0010;
-/// Number of memory groups (M0 through M9).
-pub const GROUP_COUNT: u8 = 10;
-
-/// The M0 register occupying each word of a memory group, in wire order.
+/// One of the ten memory groups, M0 through M9.
 ///
-/// Indexing this is the one statement of a group's layout: the first two words
-/// mirror [`Reg::VSet`] / [`Reg::ISet`] at `0x0000`, and the rest are the `S*`
-/// registers at [`GROUP_BASE`] upward.
-pub const GROUP_WORDS: [Reg; 14] = [
-    Reg::VSet,
-    Reg::ISet,
-    Reg::SLvp,
-    Reg::SOvp,
-    Reg::SOcp,
-    Reg::SOpp,
-    Reg::SOhpH,
-    Reg::SOhpM,
-    Reg::SOahLow,
-    Reg::SOahHigh,
-    Reg::SOwhLow,
-    Reg::SOwhHigh,
-    Reg::SOtp,
-    Reg::SIni,
-];
-
-/// Number of registers per memory group — the length of [`GROUP_WORDS`], so
-/// the two cannot disagree.
-pub const GROUP_LEN: usize = GROUP_WORDS.len();
-
-/// Base register address of memory group `n` (0..=9).
-pub const fn group_addr(n: u8) -> u16 {
-    assert!(n < GROUP_COUNT, "group index out of range");
-    GROUP_BASE + (n as u16) * GROUP_STRIDE
+/// M0 is the live operating set: its words *are* the active setpoints and
+/// protection thresholds. Being an enum rather than a validated index means an
+/// out-of-range group cannot be constructed, so nothing downstream checks for
+/// one.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum Group {
+    /// Memory group M0.
+    M0,
+    /// Memory group M1.
+    M1,
+    /// Memory group M2.
+    M2,
+    /// Memory group M3.
+    M3,
+    /// Memory group M4.
+    M4,
+    /// Memory group M5.
+    M5,
+    /// Memory group M6.
+    M6,
+    /// Memory group M7.
+    M7,
+    /// Memory group M8.
+    M8,
+    /// Memory group M9.
+    M9,
 }
 
-/// Index of `reg` within a memory group's words.
-///
-/// Panics for a register that is not part of a group — a wiring mistake, not
-/// bad device data.
-pub const fn group_offset(reg: Reg) -> usize {
-    let mut i = 0;
-    while i < GROUP_LEN {
-        if GROUP_WORDS[i] as u8 == reg as u8 {
-            return i;
-        }
-        i += 1;
+impl Group {
+    /// Base register address of M0 — the live operating set.
+    pub const BASE: u16 = 0x0050;
+    /// Address distance between consecutive groups.
+    pub const STRIDE: u16 = 0x0010;
+
+    /// The M0 register occupying each word of a group, in wire order.
+    ///
+    /// Indexing this is the one statement of a group's layout: the first two
+    /// words mirror [`Reg::VSet`] / [`Reg::ISet`] at `0x0000`, and the rest are
+    /// the `S*` registers at [`Self::BASE`] upward.
+    pub const WORDS: [Reg; 14] = [
+        Reg::VSet,
+        Reg::ISet,
+        Reg::SLvp,
+        Reg::SOvp,
+        Reg::SOcp,
+        Reg::SOpp,
+        Reg::SOhpH,
+        Reg::SOhpM,
+        Reg::SOahLow,
+        Reg::SOahHigh,
+        Reg::SOwhLow,
+        Reg::SOwhHigh,
+        Reg::SOtp,
+        Reg::SIni,
+    ];
+
+    /// Registers per group — the length of [`Self::WORDS`], so the two cannot
+    /// disagree.
+    pub const LEN: usize = Self::WORDS.len();
+
+    /// Every group, in order.
+    pub const ALL: [Self; 10] = [
+        Self::M0,
+        Self::M1,
+        Self::M2,
+        Self::M3,
+        Self::M4,
+        Self::M5,
+        Self::M6,
+        Self::M7,
+        Self::M8,
+        Self::M9,
+    ];
+
+    /// Position in `M0..=M9`.
+    pub const fn index(self) -> u8 {
+        // Fieldless and without explicit discriminants, so the cast is the
+        // declaration position. `group_addresses_are_strided` pins that
+        // against `ALL`.
+        self as u8
     }
-    panic!("register is not a memory-group word")
+
+    /// Base register address of this group's words.
+    pub const fn addr(self) -> u16 {
+        Self::BASE + (self.index() as u16) * Self::STRIDE
+    }
+
+    /// Address of `reg`'s copy within this group.
+    pub const fn word_addr(self, reg: Reg) -> u16 {
+        self.addr() + Self::word_offset(reg) as u16
+    }
+
+    /// Index of `reg` within a group's words.
+    ///
+    /// Panics for a register that is not part of a group — a wiring mistake,
+    /// not bad device data.
+    pub const fn word_offset(reg: Reg) -> usize {
+        let mut i = 0;
+        while i < Self::LEN {
+            if Self::WORDS[i] as u8 == reg as u8 {
+                return i;
+            }
+            i += 1;
+        }
+        panic!("register is not a memory-group word")
+    }
 }
 
 /// Number of registers spanned by the inclusive range `lo..=hi`. Sizes the
@@ -396,13 +453,13 @@ pub const fn offset_in(base: Reg, reg: Reg) -> usize {
     (reg.addr() - base.addr()) as usize
 }
 
-// Words 2.. of a group sit at consecutive addresses from `GROUP_BASE`, which
+// Words 2.. of a group sit at consecutive addresses from `Group::BASE`, which
 // is what lets a group be read or written as one transaction. Words 0 and 1
 // are the `0x0000` mirrors and are excluded.
 const _: () = {
     let mut i = 2;
-    while i < GROUP_LEN {
-        assert!(GROUP_WORDS[i].addr() == GROUP_BASE + i as u16);
+    while i < Group::LEN {
+        assert!(Group::WORDS[i].addr() == Group::BASE + i as u16);
         i += 1;
     }
 };
@@ -410,27 +467,27 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     extern crate std;
-    use crate::regs::{
-        Encoding, GROUP_COUNT, GROUP_LEN, GROUP_WORDS, Reg, group_addr, offset_in, span,
-    };
+    use crate::regs::{Encoding, Group, Reg, offset_in, span};
     use std::vec::Vec;
-
-    #[test]
-    #[should_panic(expected = "group index out of range")]
-    fn group_address_rejects_out_of_range_index() {
-        group_addr(GROUP_COUNT);
-    }
 
     #[test]
     fn group_addresses_are_strided() {
         // M0 at 0x0050, then 0x0010 per group up to M9 at 0x00E0.
-        assert_eq!(group_addr(0), 0x0050);
-        assert_eq!(group_addr(1), 0x0060);
-        assert_eq!(group_addr(9), 0x00E0);
+        assert_eq!(Group::M0.addr(), 0x0050);
+        assert_eq!(Group::M1.addr(), 0x0060);
+        assert_eq!(Group::M9.addr(), 0x00E0);
+        for (i, group) in Group::ALL.iter().enumerate() {
+            assert_eq!(group.index() as usize, i);
+            assert_eq!(group.addr(), Group::BASE + (i as u16) * Group::STRIDE);
+        }
         // The live protection trio sits at M0 words 2..=4.
-        assert_eq!(GROUP_WORDS[2], Reg::SLvp);
+        assert_eq!(Group::WORDS[2], Reg::SLvp);
         assert_eq!(Reg::SLvp.addr(), 0x0052);
-        assert_eq!(GROUP_WORDS[GROUP_LEN - 1], Reg::SIni);
+        assert_eq!(Group::WORDS[Group::LEN - 1], Reg::SIni);
+        // A group's copy of a register is its base plus that word's offset,
+        // and for M0 it is the register's own address.
+        assert_eq!(Group::M3.word_addr(Reg::SOtp), 0x0080 + 12);
+        assert_eq!(Group::M0.word_addr(Reg::SOvp), Reg::SOvp.addr());
     }
 
     #[test]

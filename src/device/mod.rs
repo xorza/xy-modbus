@@ -4,7 +4,7 @@
 use crate::error::{InputError, InputField, XyError};
 use crate::framing;
 use crate::regs;
-use crate::regs::{DEFAULT_SLAVE, Encoding, GROUP_BASE, GROUP_COUNT, GROUP_LEN, Reg};
+use crate::regs::{DEFAULT_SLAVE, Encoding, Group, Reg};
 use crate::transport::ModbusTransport;
 use crate::types::enums::{BaudRate, ProtectionStatus, RegMode, TempUnit};
 use crate::types::group::GroupParams;
@@ -283,14 +283,6 @@ fn check_v_set_under_ovp(v_set: u16, ovp: u16) -> Result<(), InputError> {
     Ok(())
 }
 
-fn validate_group(group: u8) -> Result<(), InputError> {
-    if group < GROUP_COUNT {
-        Ok(())
-    } else {
-        Err(InputError::InvalidGroup { group })
-    }
-}
-
 /// Result of checking whether the device's `MODEL` register belongs to the
 /// scale family supported by [`Xy`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -452,6 +444,8 @@ impl<T: ModbusTransport> Xy<T> {
 
     /// Set output voltage (V-SET, register 0x0000).
     ///
+    /// **Two transactions**: the live S-OVP, then the write.
+    ///
     /// Writing a V-SET above the live S-OVP latches OVP on the device, so the
     /// threshold is read first and such a setpoint is rejected with
     /// [`InputError::VoltageSetpointAboveProtection`] rather than sent. Raise
@@ -471,6 +465,8 @@ impl<T: ModbusTransport> Xy<T> {
 
     /// Program LVP / OVP / OCP into the active group's protection
     /// registers (0x0052–0x0054) in one bulk write.
+    ///
+    /// **Two transactions**: the live V-SET, then the write.
     ///
     /// An S-OVP below the live V-SET would latch OVP the moment it applied, so
     /// the setpoint is read first and such a threshold is rejected with
@@ -668,32 +664,58 @@ impl<T: ModbusTransport> Xy<T> {
         self.write_word(Reg::BaudCode, baud.code())
     }
 
-    /// Recall a stored memory group (M0–M9) into the live operating set.
-    /// `n == 0` is a no-op on the device (M0 is already current).
-    pub fn recall_group(&mut self, n: u8) -> Result<(), XyError> {
-        validate_group(n)?;
-        self.write_word(Reg::ExtractM, n as u16)
+    /// Recall a stored memory group into the live operating set.
+    /// [`Group::M0`] is a no-op on the device, which is already using it.
+    ///
+    /// One transaction.
+    pub fn recall_group(&mut self, group: Group) -> Result<(), XyError> {
+        self.write_word(Reg::ExtractM, group.index() as u16)
     }
 
-    /// Read all 14 registers of memory group `n` (0–9).
+    /// Read all 14 registers of a memory group.
+    ///
+    /// **Two transactions**: the displayed temperature unit, then the group
+    /// itself. S-OTP is stored in whichever unit `F-C` selects, so the unit has
+    /// to be known to label the reading. Sweeping several groups is cheaper
+    /// through [`Self::read_group_in_unit`].
     ///
     /// F-C must not be changed concurrently through another controller or the
     /// front panel while this operation is in progress.
-    pub fn read_group(&mut self, n: u8) -> Result<GroupParams, XyError> {
-        validate_group(n)?;
+    pub fn read_group(&mut self, group: Group) -> Result<GroupParams, XyError> {
         let unit = self.read_temp_unit()?;
-        self.read_group_in_unit(n, unit)
+        self.read_group_in_unit(group, unit)
     }
 
-    fn read_group_in_unit(&mut self, n: u8, unit: TempUnit) -> Result<GroupParams, XyError> {
-        let mut r = [0u16; GROUP_LEN];
-        let addr = regs::group_addr(n);
-        self.transport.read_holding(self.slave, addr, &mut r)?;
-        decode_group(&r, addr, unit)
+    /// [`Self::read_group`] with the displayed unit already in hand, costing
+    /// **one transaction** instead of two.
+    ///
+    /// `unit` must be what the device is currently displaying — take it from
+    /// [`Self::read_temp_unit`]. Reusing one value across a sweep of several
+    /// groups widens the window in which a concurrent `F-C` change would
+    /// mislabel S-OTP; that is the trade for the saved round trips.
+    pub fn read_group_in_unit(
+        &mut self,
+        group: Group,
+        unit: TempUnit,
+    ) -> Result<GroupParams, XyError> {
+        let mut r = [0u16; Group::LEN];
+        self.transport
+            .read_holding(self.slave, group.addr(), &mut r)?;
+        decode_group(&r, group, unit)
     }
 
-    /// Write all 14 registers of memory group `n` (0–9), then return the values
-    /// stored by the device after temperature conversion and rounding.
+    /// Write all 14 registers of a memory group, then return the values the
+    /// device stored after temperature conversion and rounding.
+    ///
+    /// **Four transactions for [`Group::M0`], three otherwise**: the displayed
+    /// temperature unit, the V-SET/S-OVP guard read (M0 only), the bulk write,
+    /// and the read-back. At the bundled UART's 50 ms inter-frame gap that is
+    /// roughly a fifth of a second. [`Self::write_group_in_unit`] drops the
+    /// first of them.
+    ///
+    /// Because the unit is read first, invalid parameters cost that one
+    /// transaction before being rejected. [`Self::write_group_in_unit`]
+    /// rejects them with no I/O at all.
     ///
     /// For M0 this updates the live operating set, moving V-SET and S-OVP in
     /// one frame. The order in which the device applies the registers of an
@@ -705,27 +727,37 @@ impl<T: ModbusTransport> Xy<T> {
     /// other.)
     /// F-C must not be changed concurrently through another controller or the
     /// front panel while this operation is in progress.
-    pub fn write_group(&mut self, n: u8, p: &GroupParams) -> Result<GroupParams, XyError> {
-        const V_SET: usize = regs::group_offset(Reg::VSet);
-        const S_OVP: usize = regs::group_offset(Reg::SOvp);
-
-        validate_group(n)?;
-        let encoding = encode_group(p)?;
+    pub fn write_group(&mut self, group: Group, p: &GroupParams) -> Result<GroupParams, XyError> {
         let unit = self.read_temp_unit()?;
-        let words = encoding.for_unit(unit)?;
-        if n == 0 {
+        self.write_group_in_unit(group, p, unit)
+    }
+
+    /// [`Self::write_group`] with the displayed unit already in hand, saving
+    /// the `F-C` read. The same caveat applies: `unit` must be what the device
+    /// is currently displaying.
+    pub fn write_group_in_unit(
+        &mut self,
+        group: Group,
+        p: &GroupParams,
+        unit: TempUnit,
+    ) -> Result<GroupParams, XyError> {
+        const V_SET: usize = Group::word_offset(Reg::VSet);
+        const S_OVP: usize = Group::word_offset(Reg::SOvp);
+
+        let words = encode_group(p, unit)?;
+        if group == Group::M0 {
             // V-SET and S-OVP are three registers apart, so one read of the
             // span costs less than two single-register transactions.
             let mut current = [0u16; S_OVP + 1];
             self.transport
-                .read_holding(self.slave, GROUP_BASE, &mut current)?;
+                .read_holding(self.slave, Group::BASE, &mut current)?;
             // Either register may land first, so both pairings must clear.
             check_v_set_under_ovp(words[V_SET], current[S_OVP])?;
             check_v_set_under_ovp(current[V_SET], words[S_OVP])?;
         }
         self.transport
-            .write_multiple_holdings(self.slave, regs::group_addr(n), &words)?;
-        self.read_group_in_unit(n, unit)
+            .write_multiple_holdings(self.slave, group.addr(), &words)?;
+        self.read_group_in_unit(group, unit)
     }
 
     fn read_block(&mut self, base: Reg, dst: &mut [u16]) -> Result<(), XyError> {
@@ -754,9 +786,13 @@ impl<T: ModbusTransport> Xy<T> {
     }
 }
 
-fn decode_group(r: &[u16; GROUP_LEN], addr: u16, unit: TempUnit) -> Result<GroupParams, XyError> {
-    let word = |reg: Reg| r[regs::group_offset(reg)];
-    let at = |reg: Reg| addr + regs::group_offset(reg) as u16;
+fn decode_group(
+    r: &[u16; Group::LEN],
+    group: Group,
+    unit: TempUnit,
+) -> Result<GroupParams, XyError> {
+    let word = |reg: Reg| r[Group::word_offset(reg)];
+    let at = |reg: Reg| group.word_addr(reg);
     Ok(GroupParams {
         setpoints: decode_setpoints(word(Reg::VSet), word(Reg::ISet)),
         safety_limits: SafetyLimits {
@@ -777,20 +813,7 @@ fn decode_group(r: &[u16; GROUP_LEN], addr: u16, unit: TempUnit) -> Result<Group
     })
 }
 
-#[derive(Debug)]
-struct GroupEncoding {
-    values: [u16; GROUP_LEN],
-    s_otp: Temperature,
-}
-
-impl GroupEncoding {
-    fn for_unit(mut self, unit: TempUnit) -> Result<[u16; GROUP_LEN], InputError> {
-        self.values[regs::group_offset(Reg::SOtp)] = encode_group_otp(self.s_otp, unit)?;
-        Ok(self.values)
-    }
-}
-
-fn encode_group(p: &GroupParams) -> Result<GroupEncoding, InputError> {
+fn encode_group(p: &GroupParams, unit: TempUnit) -> Result<[u16; Group::LEN], InputError> {
     if !p.s_otp.value.is_finite() {
         return Err(InputError::NonFinite {
             field: InputField::OverTemperatureProtection,
@@ -802,31 +825,28 @@ fn encode_group(p: &GroupParams) -> Result<GroupEncoding, InputError> {
     let owh = to_reg_wide(Reg::SOwhLow, p.s_owh_wh)?;
 
     // Assigned by register rather than as a positional literal, so wire order
-    // is stated once, in `regs::GROUP_WORDS`. S-OTP is left for `for_unit`,
-    // which needs the displayed temperature unit.
-    let mut values = [0u16; GROUP_LEN];
-    values[regs::group_offset(Reg::VSet)] = to_reg(Reg::VSet, p.setpoints.v_set)?;
-    values[regs::group_offset(Reg::ISet)] = to_reg(Reg::ISet, p.setpoints.i_set)?;
-    values[regs::group_offset(Reg::SLvp)] = to_reg(Reg::SLvp, p.safety_limits.lvp_v)?;
-    values[regs::group_offset(Reg::SOvp)] = to_reg(Reg::SOvp, p.safety_limits.ovp_v)?;
-    values[regs::group_offset(Reg::SOcp)] = to_reg(Reg::SOcp, p.safety_limits.ocp_a)?;
-    values[regs::group_offset(Reg::SOpp)] = to_reg(Reg::SOpp, p.s_opp_w)?;
-    values[regs::group_offset(Reg::SOhpH)] = p.s_ohp_h;
-    values[regs::group_offset(Reg::SOhpM)] = p.s_ohp_m;
-    values[regs::group_offset(Reg::SOahLow)] = oah.low;
-    values[regs::group_offset(Reg::SOahHigh)] = oah.high;
-    values[regs::group_offset(Reg::SOwhLow)] = owh.low;
-    values[regs::group_offset(Reg::SOwhHigh)] = owh.high;
-    values[regs::group_offset(Reg::SIni)] = p.power_on_output as u16;
+    // is stated once, in `Group::WORDS`.
+    let mut values = [0u16; Group::LEN];
+    values[Group::word_offset(Reg::VSet)] = to_reg(Reg::VSet, p.setpoints.v_set)?;
+    values[Group::word_offset(Reg::ISet)] = to_reg(Reg::ISet, p.setpoints.i_set)?;
+    values[Group::word_offset(Reg::SLvp)] = to_reg(Reg::SLvp, p.safety_limits.lvp_v)?;
+    values[Group::word_offset(Reg::SOvp)] = to_reg(Reg::SOvp, p.safety_limits.ovp_v)?;
+    values[Group::word_offset(Reg::SOcp)] = to_reg(Reg::SOcp, p.safety_limits.ocp_a)?;
+    values[Group::word_offset(Reg::SOpp)] = to_reg(Reg::SOpp, p.s_opp_w)?;
+    values[Group::word_offset(Reg::SOhpH)] = p.s_ohp_h;
+    values[Group::word_offset(Reg::SOhpM)] = p.s_ohp_m;
+    values[Group::word_offset(Reg::SOahLow)] = oah.low;
+    values[Group::word_offset(Reg::SOahHigh)] = oah.high;
+    values[Group::word_offset(Reg::SOwhLow)] = owh.low;
+    values[Group::word_offset(Reg::SOwhHigh)] = owh.high;
+    values[Group::word_offset(Reg::SOtp)] = encode_group_otp(p.s_otp, unit)?;
+    values[Group::word_offset(Reg::SIni)] = p.power_on_output as u16;
 
     check_v_set_under_ovp(
-        values[regs::group_offset(Reg::VSet)],
-        values[regs::group_offset(Reg::SOvp)],
+        values[Group::word_offset(Reg::VSet)],
+        values[Group::word_offset(Reg::SOvp)],
     )?;
-    Ok(GroupEncoding {
-        values,
-        s_otp: p.s_otp,
-    })
+    Ok(values)
 }
 
 /// Group writes route S-OTP through firmware unit conversion, which clamps at

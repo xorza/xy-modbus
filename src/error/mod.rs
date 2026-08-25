@@ -223,7 +223,6 @@ impl fmt::Display for InputField {
 pub enum InputError {
     NonFinite { field: InputField },
     OutOfRange { field: InputField },
-    InvalidGroup { group: u8 },
     VoltageSetpointAboveProtection,
 }
 
@@ -232,7 +231,6 @@ impl fmt::Display for InputError {
         match self {
             Self::NonFinite { field } => write!(f, "{field} must be finite"),
             Self::OutOfRange { field } => write!(f, "{field} is out of range"),
-            Self::InvalidGroup { group } => write!(f, "invalid memory group {group}"),
             Self::VoltageSetpointAboveProtection => {
                 f.write_str("voltage setpoint exceeds over-voltage protection")
             }

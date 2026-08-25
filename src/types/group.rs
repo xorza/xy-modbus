@@ -2,15 +2,16 @@
 
 use crate::types::status::{SafetyLimits, Setpoints, Temperature};
 
-/// All 14 registers of a memory group (M0–M9). Field order matches the
-/// on-wire register order.
+/// Every register of a memory group, as physical values.
 ///
-/// Note the cumulative limits use *different* scales: `s_oah_ah` is the
-/// charge limit in Ah (encoded raw / 1000), `s_owh_wh` the energy limit
-/// in Wh (encoded raw / 100 — 10 mWh units, *not* the 1 mWh scale used
-/// by the cumulative WH counters at 0x0008/0x0009). The XY firmware
-/// stores the energy threshold in coarser units to extend the 32-bit
-/// range to ~42.9 MWh.
+/// Field order here is for readers, not for the wire: encoding and decoding
+/// address each word by [`crate::regs::Reg`], and
+/// [`crate::regs::Group::WORDS`] is the only statement of wire order. Adding
+/// or reordering a field cannot silently change the frame.
+///
+/// The two cumulative limits are stored at *different* scales — see
+/// [`crate::regs::OAH_LIMIT_SCALE`] and [`crate::regs::OWH_LIMIT_SCALE`],
+/// where the reason lives.
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct GroupParams {

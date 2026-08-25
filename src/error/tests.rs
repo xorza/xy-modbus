@@ -22,10 +22,6 @@ fn input_error_display_identifies_each_invalid_input() {
             "current setpoint is out of range",
         ),
         (
-            InputError::InvalidGroup { group: 10 },
-            "invalid memory group 10",
-        ),
-        (
             InputError::VoltageSetpointAboveProtection,
             "voltage setpoint exceeds over-voltage protection",
         ),

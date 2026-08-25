@@ -290,7 +290,7 @@ fn read_group_decodes_14_regs() {
             values: vec![1],
         },
         Op::Read {
-            addr: regs::group_addr(1),
+            addr: Group::M1.addr(),
             values: vec![
                 1440, // v_set
                 1000, // i_set
@@ -310,7 +310,7 @@ fn read_group_decodes_14_regs() {
         },
     ]);
     let mut xy = Xy::new(mock);
-    let g = xy.read_group(1).unwrap();
+    let g = xy.read_group(Group::M1).unwrap();
     assert_eq!(g.setpoints.v_set, 14.40);
     assert_eq!(g.safety_limits.ovp_v, 15.00);
     assert_eq!(g.s_opp_w, 1800.0);
@@ -356,23 +356,23 @@ fn write_group_round_trips_through_encode() {
             values: vec![0],
         },
         Op::WriteMany {
-            addr: regs::group_addr(2),
+            addr: Group::M2.addr(),
             values: vec![1440, 1000, 1000, 1500, 1250, 1800, 0, 0, 0, 0, 0, 0, 95, 1],
         },
         Op::Read {
-            addr: regs::group_addr(2),
+            addr: Group::M2.addr(),
             values: stored,
         },
     ]);
     let mut xy = Xy::new(mock);
-    let written = xy.write_group(2, &p).unwrap();
+    let written = xy.write_group(Group::M2, &p).unwrap();
     assert_eq!(written.s_otp.value, 94.0);
     assert_ne!(written.s_otp, p.s_otp);
 
     let mut invalid = p;
     invalid.safety_limits.lvp_v = 9.99;
     assert_eq!(
-        xy.write_group(2, &invalid),
+        xy.write_group_in_unit(Group::M2, &invalid, TempUnit::Celsius),
         Err(XyError::Input(InputError::OutOfRange {
             field: InputField::LowVoltageProtection
         }))
@@ -381,12 +381,15 @@ fn write_group_round_trips_through_encode() {
     let mut invalid = p;
     invalid.s_otp.value = f32::NAN;
     assert_eq!(
-        xy.write_group(2, &invalid),
+        xy.write_group_in_unit(Group::M2, &invalid, TempUnit::Celsius),
         Err(XyError::Input(InputError::NonFinite {
             field: InputField::OverTemperatureProtection
         }))
     );
 
+    // S-OTP's ceiling is the one bound that depends on the displayed unit, so
+    // this case goes through `write_group`, which reads F-C first — pinning
+    // that it costs exactly that one transaction before rejecting.
     let mut invalid = p;
     invalid.s_otp.value = 110.1;
     let mut invalid_xy = Xy::new(MockTransport::new(vec![Op::Read {
@@ -394,7 +397,7 @@ fn write_group_round_trips_through_encode() {
         values: vec![0],
     }]));
     assert_eq!(
-        invalid_xy.write_group(2, &invalid),
+        invalid_xy.write_group(Group::M2, &invalid),
         Err(XyError::Input(InputError::OutOfRange {
             field: InputField::OverTemperatureProtection
         }))
@@ -403,7 +406,7 @@ fn write_group_round_trips_through_encode() {
     let mut invalid = p;
     invalid.setpoints.v_set = 15.01;
     assert_eq!(
-        xy.write_group(2, &invalid),
+        xy.write_group_in_unit(Group::M2, &invalid, TempUnit::Celsius),
         Err(XyError::Input(InputError::VoltageSetpointAboveProtection))
     );
 }
@@ -506,17 +509,17 @@ fn live_group_rejects_protection_crossing_in_either_direction() {
                 values: vec![0],
             },
             Op::Read {
-                addr: GROUP_BASE,
+                addr: Group::BASE,
                 values: case.current.to_vec(),
             },
         ];
         if case.accepted {
             script.push(Op::WriteMany {
-                addr: regs::group_addr(0),
+                addr: Group::M0.addr(),
                 values: values.clone(),
             });
             script.push(Op::Read {
-                addr: regs::group_addr(0),
+                addr: Group::M0.addr(),
                 values,
             });
         }
@@ -524,7 +527,7 @@ fn live_group_rejects_protection_crossing_in_either_direction() {
         // A rejected case scripts only the two reads, so the mock's
         // drop-time check proves nothing was written.
         let mut xy = Xy::new(MockTransport::new(script));
-        let result = xy.write_group(0, &p);
+        let result = xy.write_group(Group::M0, &p);
         if case.accepted {
             assert_eq!(result.unwrap(), p, "{case:?}");
         } else {
@@ -583,13 +586,10 @@ fn group_encode_decode_round_trip() {
         },
         power_on_output: true,
     };
-    let regs = encode_group(&p)
-        .unwrap()
-        .for_unit(TempUnit::Celsius)
-        .unwrap();
+    let regs = encode_group(&p, TempUnit::Celsius).unwrap();
     // Pin the encoded oah/owh register pair layout (low, high).
     assert_eq!(regs[8..12], [500, 2, 12_345, 0]);
-    let decoded = decode_group(&regs, regs::group_addr(0), TempUnit::Celsius).unwrap();
+    let decoded = decode_group(&regs, Group::M0, TempUnit::Celsius).unwrap();
     assert_eq!(decoded.setpoints, p.setpoints);
     assert_eq!(decoded.safety_limits, p.safety_limits);
     assert_eq!(decoded.s_opp_w, p.s_opp_w);
@@ -600,10 +600,7 @@ fn group_encode_decode_round_trip() {
     assert_eq!(decoded.s_otp, p.s_otp);
     assert_eq!(decoded.power_on_output, p.power_on_output);
 
-    let fahrenheit_regs = encode_group(&p)
-        .unwrap()
-        .for_unit(TempUnit::Fahrenheit)
-        .unwrap();
+    let fahrenheit_regs = encode_group(&p, TempUnit::Fahrenheit).unwrap();
     assert_eq!(fahrenheit_regs[12], 203);
     assert_ne!(fahrenheit_regs[12], regs[12]);
 
@@ -613,17 +610,12 @@ fn group_encode_decode_round_trip() {
         unit: TempUnit::Fahrenheit,
     };
     assert_eq!(
-        encode_group(&fahrenheit_limit)
-            .unwrap()
-            .for_unit(TempUnit::Celsius)
-            .unwrap()[12],
+        encode_group(&fahrenheit_limit, TempUnit::Celsius).unwrap()[12],
         110
     );
     fahrenheit_limit.s_otp.value = 230.1;
     assert_eq!(
-        encode_group(&fahrenheit_limit)
-            .unwrap()
-            .for_unit(TempUnit::Fahrenheit),
+        encode_group(&fahrenheit_limit, TempUnit::Fahrenheit),
         Err(InputError::OutOfRange {
             field: InputField::OverTemperatureProtection
         })
@@ -632,16 +624,11 @@ fn group_encode_decode_round_trip() {
     let mut source_unit_outlier = p;
     source_unit_outlier.s_otp.value = -1.0;
     assert_eq!(
-        encode_group(&source_unit_outlier)
-            .unwrap()
-            .for_unit(TempUnit::Fahrenheit)
-            .unwrap()[12],
+        encode_group(&source_unit_outlier, TempUnit::Fahrenheit).unwrap()[12],
         30
     );
     assert_eq!(
-        encode_group(&source_unit_outlier)
-            .unwrap()
-            .for_unit(TempUnit::Celsius),
+        encode_group(&source_unit_outlier, TempUnit::Celsius),
         Err(InputError::OutOfRange {
             field: InputField::OverTemperatureProtection
         })
@@ -693,7 +680,8 @@ fn one_shot_setters_use_correct_addr_and_value() {
         .set_slave_address(7));
     check!(Reg::SIni.addr(), 1, |x: &mut Xy<_>| x
         .set_power_on_output(true));
-    check!(Reg::ExtractM.addr(), 3, |x: &mut Xy<_>| x.recall_group(3));
+    check!(Reg::ExtractM.addr(), 3, |x: &mut Xy<_>| x
+        .recall_group(Group::M3));
     check!(Reg::BaudCode.addr(), 6, |x: &mut Xy<_>| x
         .set_baud_rate(BaudRate::B115200));
     check!(Reg::TempUnit.addr(), 1, |x: &mut Xy<_>| x
@@ -878,11 +866,11 @@ fn one_shot_getters_use_correct_addr_and_scale() {
 
 #[test]
 fn invalid_register_values_are_not_normalized() {
-    let mut invalid_group_bool = vec![0; GROUP_LEN];
+    let mut invalid_group_bool = vec![0; Group::LEN];
     invalid_group_bool[13] = 2;
-    let mut invalid_group_hours = vec![0; GROUP_LEN];
+    let mut invalid_group_hours = vec![0; Group::LEN];
     invalid_group_hours[6] = 100;
-    let mut invalid_group_minutes = vec![0; GROUP_LEN];
+    let mut invalid_group_minutes = vec![0; Group::LEN];
     invalid_group_minutes[7] = 60;
     let mut invalid_output_status = status_fixture([0; 6]);
     invalid_output_status[Reg::OutputEn.addr() as usize] = 2;
@@ -924,7 +912,7 @@ fn invalid_register_values_are_not_normalized() {
             values: vec![0],
         },
         Op::Read {
-            addr: regs::group_addr(1),
+            addr: Group::M1.addr(),
             values: invalid_group_bool,
         },
         Op::Read {
@@ -932,7 +920,7 @@ fn invalid_register_values_are_not_normalized() {
             values: vec![0],
         },
         Op::Read {
-            addr: regs::group_addr(2),
+            addr: Group::M2.addr(),
             values: invalid_group_hours,
         },
         Op::Read {
@@ -940,7 +928,7 @@ fn invalid_register_values_are_not_normalized() {
             values: vec![0],
         },
         Op::Read {
-            addr: regs::group_addr(3),
+            addr: Group::M3.addr(),
             values: invalid_group_minutes,
         },
         Op::Read {
@@ -981,9 +969,21 @@ fn invalid_register_values_are_not_normalized() {
         (xy.read_reg_mode().map(|_| ()), Reg::Cvcc.addr(), 2),
         (xy.read_temp_unit().map(|_| ()), Reg::TempUnit.addr(), 2),
         (xy.read_baud_rate().map(|_| ()), Reg::BaudCode.addr(), 9),
-        (xy.read_group(1).map(|_| ()), regs::group_addr(1) + 13, 2),
-        (xy.read_group(2).map(|_| ()), regs::group_addr(2) + 6, 100),
-        (xy.read_group(3).map(|_| ()), regs::group_addr(3) + 7, 60),
+        (
+            xy.read_group(Group::M1).map(|_| ()),
+            Group::M1.addr() + 13,
+            2,
+        ),
+        (
+            xy.read_group(Group::M2).map(|_| ()),
+            Group::M2.addr() + 6,
+            100,
+        ),
+        (
+            xy.read_group(Group::M3).map(|_| ()),
+            Group::M3.addr() + 7,
+            60,
+        ),
         (xy.read_totals().map(|_| ()), Reg::OutM.addr(), 60),
         (xy.read_totals().map(|_| ()), Reg::OutS.addr(), 60),
         (
@@ -1079,10 +1079,12 @@ fn invalid_inputs_fail_before_transport_io() {
         xy.set_backlight(0),
         xy.set_backlight(6),
         xy.set_sleep_minutes(10),
-        xy.recall_group(10),
     ] {
         assert!(matches!(result, Err(XyError::Input(_))));
     }
+
+    // An out-of-range memory group has no test: `Group` is an enum, so one
+    // cannot be constructed to pass in.
 
     // A bad slave address is a Modbus-level fault rather than a value fault,
     // so it reports the variant the transport would, not an `InputError`.
