@@ -6,7 +6,7 @@ use embedded_io::ErrorType;
 
 use super::*;
 use crate::error::RtuError;
-use crate::framing::{MAX_READ_REGS, crc16_modbus};
+use crate::framing::{MAX_READ_REGS, MAX_WRITE_REGS, crc16_modbus};
 
 /// Mock UART: `stale` bytes are visible immediately (simulating
 /// junk in the RX FIFO before the request); `response` bytes only

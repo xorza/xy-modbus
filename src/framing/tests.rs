@@ -285,7 +285,6 @@ fn request_builders_validate_slave_addresses() {
     }
 }
 
-#[cfg(feature = "embedded-io")]
 #[test]
 fn response_prefix_selects_and_validates_adu_length() {
     assert_eq!(

@@ -8,12 +8,51 @@
 //!
 //! CRC-16 is the standard reflected polynomial `0xA001`, seeded
 //! `0xFFFF`, no final XOR. The CRC is appended low-byte first.
+//!
+//! # Two ways to receive a response
+//!
+//! A transport that reads a whole frame at once — classic RTU t3.5 silence
+//! framing — hands the bytes straight to `parse_*`, which validates everything
+//! on its own.
+//!
+//! A transport that streams cannot know how many bytes to expect until it has
+//! seen the header, so it reads three bytes, calls [`response_adu_len`] to
+//! learn the total, reads the rest, then calls `parse_*`:
+//!
+//! ```no_run
+//! # use xy_modbus::RtuError;
+//! # use xy_modbus::framing::{self, MAX_ADU, ResponseShape};
+//! # fn read_exact(_: &mut [u8]) -> Result<(), RtuError> { unimplemented!() }
+//! # fn write_all(_: &[u8]) -> Result<(), RtuError> { unimplemented!() }
+//! # fn main() -> Result<(), RtuError> {
+//! # let (slave, addr) = (1u8, 0u16);
+//! let mut dst = [0u16; 4];
+//! write_all(&framing::build_read_request(slave, addr, dst.len())?)?;
+//!
+//! let mut buf = [0u8; MAX_ADU];
+//! read_exact(&mut buf[..3])?;
+//! let len = framing::response_adu_len(
+//!     [buf[0], buf[1], buf[2]],
+//!     slave,
+//!     ResponseShape::ReadHolding { register_count: dst.len() },
+//! )?;
+//! read_exact(&mut buf[3..len])?;
+//! framing::parse_read_response(&buf[..len], slave, &mut dst)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The two paths overlap deliberately: each validates the header from scratch,
+//! because either may be used without the other.
 
 use crate::error::RtuError;
 
-pub(crate) const FN_READ_HOLDING: u8 = 0x03;
-pub(crate) const FN_WRITE_SINGLE: u8 = 0x06;
-pub(crate) const FN_WRITE_MULTIPLE: u8 = 0x10;
+/// `Read Holding Registers`.
+pub const FN_READ_HOLDING: u8 = 0x03;
+/// `Write Single Holding Register`.
+pub const FN_WRITE_SINGLE: u8 = 0x06;
+/// `Write Multiple Holding Registers`.
+pub const FN_WRITE_MULTIPLE: u8 = 0x10;
 
 /// Modbus exception flag (high bit of the function-code byte). Per the
 /// spec, function codes occupy 1..=127 — any FC byte with bit 7 set is
@@ -30,6 +69,11 @@ pub const MAX_READ_REGS: usize = 125;
 /// Maximum registers in a single `Write Multiple Holdings` request
 /// (Modbus standard limit).
 pub const MAX_WRITE_REGS: usize = 123;
+
+// The largest legal `Write Multiple` frame — slave + fc + addr + qty + bc +
+// 2*regs + crc — must still fit an `MAX_ADU` buffer, which is what lets a
+// transport assemble a request into one scratch buffer of that size.
+const _: () = assert!(MAX_ADU >= 9 + 2 * MAX_WRITE_REGS);
 
 /// Standard Modbus-RTU CRC-16.
 pub fn crc16_modbus(data: &[u8]) -> u16 {
@@ -140,16 +184,26 @@ pub fn build_write_multiple_request(
     Ok(len)
 }
 
-#[cfg(feature = "embedded-io")]
+/// Which response a [`response_adu_len`] call is classifying.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ResponseShape {
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum ResponseShape {
+    /// Reply to [`FN_READ_HOLDING`], carrying `register_count` registers.
     ReadHolding { register_count: usize },
+    /// Reply to [`FN_WRITE_SINGLE`], which echoes the request.
     WriteSingle,
+    /// Reply to [`FN_WRITE_MULTIPLE`].
     WriteMultiple,
 }
 
-#[cfg(feature = "embedded-io")]
-pub(crate) fn response_adu_len(
+/// Total ADU length implied by a response's first three bytes, so a streaming
+/// transport knows how many more to read.
+///
+/// Validates only what it must to compute that length safely: the slave
+/// address, the function code, and — for a read — the byte count. An exception
+/// response is five bytes and is reported as such rather than as an error, so
+/// the caller can read it and let `parse_*` surface the exception code.
+pub fn response_adu_len(
     prefix: [u8; 3],
     slave: u8,
     shape: ResponseShape,
@@ -185,23 +239,39 @@ pub(crate) fn response_adu_len(
     }
 }
 
-fn check_crc(resp: &[u8], len: usize) -> Result<(), RtuError> {
-    if resp.len() < len {
+/// Reject a frame that is not exactly `expected` bytes. Short is reported
+/// separately from long: short usually means a truncated read, long means the
+/// frame was not what the function code promised.
+fn check_frame_len(resp: &[u8], expected: usize) -> Result<(), RtuError> {
+    if resp.len() < expected {
         return Err(RtuError::ShortResponse(resp.len()));
     }
-    if resp.len() != len {
+    if resp.len() > expected {
         return Err(RtuError::BadHeader);
     }
-    let got = u16::from_le_bytes([resp[len - 2], resp[len - 1]]);
-    let calc = crc16_modbus(&resp[..len - 2]);
-    if got == calc {
+    Ok(())
+}
+
+/// Verify the trailing CRC-16 over everything preceding it. `resp` must
+/// already be exactly one frame — see [`check_frame_len`].
+fn check_crc(resp: &[u8]) -> Result<(), RtuError> {
+    debug_assert!(
+        resp.len() >= 4,
+        "CRC check needs a header and two CRC bytes"
+    );
+    let n = resp.len();
+    let got = u16::from_le_bytes([resp[n - 2], resp[n - 1]]);
+    if got == crc16_modbus(&resp[..n - 2]) {
         Ok(())
     } else {
         Err(RtuError::BadCrc)
     }
 }
 
-fn check_exception(resp: &[u8], slave: u8, expected_fn: u8) -> Result<(), RtuError> {
+/// Validate what every response shares — enough bytes to hold a header, and
+/// the slave address we addressed — and surface an exception response as
+/// [`RtuError::Exception`] rather than letting it fail as a malformed reply.
+fn check_common_header(resp: &[u8], slave: u8, expected_fn: u8) -> Result<(), RtuError> {
     if resp.len() < 5 {
         return Err(RtuError::ShortResponse(resp.len()));
     }
@@ -209,7 +279,8 @@ fn check_exception(resp: &[u8], slave: u8, expected_fn: u8) -> Result<(), RtuErr
         return Err(RtuError::BadSlave(resp[0]));
     }
     if resp[1] == expected_fn | EXCEPTION_BIT {
-        check_crc(resp, 5)?;
+        check_frame_len(resp, 5)?;
+        check_crc(resp)?;
         return Err(RtuError::Exception(resp[2]));
     }
     if resp[1] & EXCEPTION_BIT != 0 {
@@ -225,13 +296,13 @@ pub fn parse_read_response(resp: &[u8], slave: u8, out: &mut [u16]) -> Result<()
     if out.is_empty() || out.len() > MAX_READ_REGS {
         return Err(RtuError::InvalidQuantity(out.len()));
     }
-    check_exception(resp, slave, FN_READ_HOLDING)?;
+    check_common_header(resp, slave, FN_READ_HOLDING)?;
     let count = out.len();
-    let expected_len = 5 + 2 * count;
     if resp[1] != FN_READ_HOLDING || resp[2] as usize != 2 * count {
         return Err(RtuError::BadHeader);
     }
-    check_crc(resp, expected_len)?;
+    check_frame_len(resp, 5 + 2 * count)?;
+    check_crc(resp)?;
     for (i, slot) in out.iter_mut().enumerate() {
         *slot = u16::from_be_bytes([resp[3 + 2 * i], resp[4 + 2 * i]]);
     }
@@ -241,9 +312,13 @@ pub fn parse_read_response(resp: &[u8], slave: u8, out: &mut [u16]) -> Result<()
 /// Parse a `Write Single Holding Register` response. Per Modbus spec the
 /// response echoes the request byte-for-byte.
 pub fn parse_write_single_response(resp: &[u8], req: &[u8; 8]) -> Result<(), RtuError> {
-    check_exception(resp, req[0], FN_WRITE_SINGLE)?;
-    check_crc(resp, 8)?;
-    if resp != req {
+    check_common_header(resp, req[0], FN_WRITE_SINGLE)?;
+    check_frame_len(resp, 8)?;
+    check_crc(resp)?;
+    // The reply echoes the request. Its CRC is verified above, so only the six
+    // bytes before it need comparing — and comparing them separately keeps a
+    // corrupted line reported as `BadCrc` rather than as a bad echo.
+    if resp[..6] != req[..6] {
         return Err(RtuError::BadHeader);
     }
     Ok(())
@@ -257,8 +332,9 @@ pub fn parse_write_multiple_response(
     addr: u16,
     qty: u16,
 ) -> Result<(), RtuError> {
-    check_exception(resp, slave, FN_WRITE_MULTIPLE)?;
-    check_crc(resp, 8)?;
+    check_common_header(resp, slave, FN_WRITE_MULTIPLE)?;
+    check_frame_len(resp, 8)?;
+    check_crc(resp)?;
     if resp[1] != FN_WRITE_MULTIPLE
         || u16::from_be_bytes([resp[2], resp[3]]) != addr
         || u16::from_be_bytes([resp[4], resp[5]]) != qty

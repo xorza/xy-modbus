@@ -23,13 +23,8 @@ use embedded_hal::delay::DelayNs;
 use embedded_io::Write;
 
 use crate::error::{IoErrorKind, IoOperation, RtuError};
-use crate::framing::{self, MAX_ADU, MAX_WRITE_REGS, ResponseShape};
+use crate::framing::{self, MAX_ADU, ResponseShape};
 use crate::transport::ModbusTransport;
-
-// `write_multiple_holdings` builds the request frame into `self.buf` and
-// `expect`s success — sound only because the buffer fits the largest
-// possible Write Multiple frame (slave + fc + addr + qty + bc + 2*regs + crc).
-const _: () = assert!(MAX_ADU >= 9 + 2 * MAX_WRITE_REGS);
 
 /// Read side of [`UartTransport`].
 ///
