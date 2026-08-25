@@ -4,94 +4,191 @@
 pub(crate) mod error;
 
 use crate::device::error::{InputError, InputField, XyError};
-use crate::regs::*;
+use crate::regs;
+use crate::regs::{DEFAULT_SLAVE, Encoding, GROUP_BASE, GROUP_COUNT, GROUP_LEN, Reg};
 use crate::transport::{ModbusTransport, RtuError};
 use crate::types::enums::{BaudRate, ProtectionStatus, RegMode, TempUnit};
 use crate::types::group::GroupParams;
 use crate::types::status::{OnTime, SafetyLimits, Setpoints, Status, Temperature, Totals};
 
-const CURRENT_SCALE: f32 = 100.0;
-const POWER_SCALE: f32 = 10.0;
-const OPP_SCALE: f32 = 1.0;
-
+/// Where an input's accepted bounds come from.
 #[derive(Copy, Clone, Debug)]
-struct ValueRange {
-    min: f64,
-    max: f64,
+enum InputLimit {
+    /// Fixed physical bounds in the register's own unit.
+    Scalar { min: f32, max: f32 },
+    /// Fixed bounds for a 32-bit pair, whose range exceeds exact `f32`.
+    Wide { min: f64, max: f64 },
+    /// The register's own [`Encoding::Int`] range.
+    FromEncoding,
+    /// Bounds vary at runtime, so the caller supplies them — S-OTP's ceiling
+    /// depends on the displayed temperature unit.
+    Dynamic,
 }
 
-impl ValueRange {
-    fn contains(self, value: f64) -> bool {
-        self.min <= value && value <= self.max
+/// What a register accepts on the way in, and the field a rejection names.
+#[derive(Copy, Clone, Debug)]
+struct InputSpec {
+    limit: InputLimit,
+    field: InputField,
+}
+
+/// Physical write limits, one statement per register. Scale and signedness
+/// come from [`Reg::encoding`], so a limit can never disagree with the scale
+/// it is expressed in.
+const fn input_spec(reg: Reg) -> InputSpec {
+    let (limit, field) = match reg {
+        Reg::VSet => (
+            InputLimit::Scalar {
+                min: 0.0,
+                max: 70.0,
+            },
+            InputField::VoltageSetpoint,
+        ),
+        Reg::ISet => (
+            InputLimit::Scalar {
+                min: 0.0,
+                max: 25.0,
+            },
+            InputField::CurrentSetpoint,
+        ),
+        Reg::SLvp => (
+            InputLimit::Scalar {
+                min: 10.0,
+                max: 95.0,
+            },
+            InputField::LowVoltageProtection,
+        ),
+        Reg::SOvp => (
+            InputLimit::Scalar {
+                min: 0.0,
+                max: 72.0,
+            },
+            InputField::OverVoltageProtection,
+        ),
+        Reg::SOcp => (
+            InputLimit::Scalar {
+                min: 0.0,
+                max: 27.0,
+            },
+            InputField::OverCurrentProtection,
+        ),
+        Reg::SOpp => (
+            InputLimit::Scalar {
+                min: 0.0,
+                max: 2000.0,
+            },
+            InputField::OverPowerProtection,
+        ),
+        Reg::SOahLow => (
+            InputLimit::Wide {
+                min: 0.0,
+                max: 9999.0,
+            },
+            InputField::ChargeLimit,
+        ),
+        Reg::SOwhLow => (
+            InputLimit::Wide {
+                min: 0.0,
+                max: 4_200_000.0,
+            },
+            InputField::EnergyLimit,
+        ),
+        Reg::SOtp => (InputLimit::Dynamic, InputField::OverTemperatureProtection),
+        Reg::SOhpH => (InputLimit::FromEncoding, InputField::OutputTimeHours),
+        Reg::SOhpM => (InputLimit::FromEncoding, InputField::OutputTimeMinutes),
+        Reg::Backlight => (InputLimit::FromEncoding, InputField::Backlight),
+        Reg::Sleep => (InputLimit::FromEncoding, InputField::SleepTimeout),
+        _ => panic!("register is not a validated write target"),
+    };
+    InputSpec { limit, field }
+}
+
+/// Divisor for a fixed-point register. Panics for a register that carries no
+/// scale — a wiring mistake in this crate, never bad device data.
+const fn scale_of(reg: Reg) -> f32 {
+    match reg.encoding() {
+        Encoding::Unsigned { scale } | Encoding::Signed { scale } => scale,
+        _ => panic!("register is not fixed-point"),
     }
 }
 
-const VOLTAGE_SET_RANGE: ValueRange = ValueRange {
-    min: 0.0,
-    max: 70.0,
-};
-const CURRENT_SET_RANGE: ValueRange = ValueRange {
-    min: 0.0,
-    max: 25.0,
-};
-const LVP_RANGE: ValueRange = ValueRange {
-    min: 10.0,
-    max: 95.0,
-};
-const OVP_RANGE: ValueRange = ValueRange {
-    min: 0.0,
-    max: 72.0,
-};
-const OCP_RANGE: ValueRange = ValueRange {
-    min: 0.0,
-    max: 27.0,
-};
-const OPP_RANGE: ValueRange = ValueRange {
-    min: 0.0,
-    max: 2000.0,
-};
-const CHARGE_LIMIT_RANGE: ValueRange = ValueRange {
-    min: 0.0,
-    max: 9999.0,
-};
-const ENERGY_LIMIT_RANGE: ValueRange = ValueRange {
-    min: 0.0,
-    max: 4_200_000.0,
-};
-
-fn to_reg_u16(v: f32, scale: f32, range: ValueRange, field: InputField) -> Result<u16, InputError> {
-    if !v.is_finite() {
-        return Err(InputError::NonFinite { field });
+/// Divisor for a 32-bit pair, taken from its low word.
+const fn wide_scale_of(low: Reg) -> f64 {
+    match low.encoding() {
+        Encoding::WideLow { scale } => scale,
+        _ => panic!("register is not the low word of a 32-bit pair"),
     }
-    let scaled = v * scale;
-    if !range.contains(v as f64) || scaled > u16::MAX as f32 + 0.5 {
-        return Err(InputError::OutOfRange { field });
+}
+
+/// Decode a fixed-point word, honouring the register's own signedness. The
+/// signed case is why `T-IN` no longer reports 6548.6 °C at −5 °C.
+fn decode_scaled(reg: Reg, raw: u16) -> f32 {
+    match reg.encoding() {
+        Encoding::Unsigned { scale } => raw as f32 / scale,
+        Encoding::Signed { scale } => raw as i16 as f32 / scale,
+        _ => panic!("register is not fixed-point"),
     }
-    let raw = (scaled + 0.5) as u16;
-    if !range.contains(raw as f64 / scale as f64) {
-        return Err(InputError::OutOfRange { field });
-    }
-    Ok(raw)
 }
 
-fn from_reg_u16(raw: u16, scale: f32) -> f32 {
-    raw as f32 / scale
+fn decode_wide(low: Reg, low_word: u16, high_word: u16) -> f64 {
+    let raw = ((high_word as u32) << 16) | low_word as u32;
+    raw as f64 / wide_scale_of(low)
 }
 
-fn from_reg_i16(raw: u16, scale: f32) -> f32 {
-    raw as i16 as f32 / scale
-}
-
-fn from_reg_u32(low: u16, high: u16, scale: f64) -> f64 {
-    let raw = ((high as u32) << 16) | low as u32;
-    raw as f64 / scale
-}
-
-fn decode_setpoints(v_set: u16, i_set: u16, current_scale: f32) -> Setpoints {
+fn decode_setpoints(v_set: u16, i_set: u16) -> Setpoints {
     Setpoints {
-        v_set: from_reg_u16(v_set, 100.0),
-        i_set: from_reg_u16(i_set, current_scale),
+        v_set: decode_scaled(Reg::VSet, v_set),
+        i_set: decode_scaled(Reg::ISet, i_set),
     }
+}
+
+/// Decode a word that came from `addr`. Group copies of a register live at a
+/// different address than the M0 original, so the reported address is separate
+/// from the register whose encoding is applied.
+fn decode_flag_at(reg: Reg, addr: u16, raw: u16) -> Result<bool, XyError> {
+    debug_assert!(matches!(reg.encoding(), Encoding::Flag));
+    match raw {
+        0 => Ok(false),
+        1 => Ok(true),
+        value => Err(XyError::InvalidRegisterValue {
+            register: addr,
+            value,
+        }),
+    }
+}
+
+fn decode_flag(reg: Reg, raw: u16) -> Result<bool, XyError> {
+    decode_flag_at(reg, reg.addr(), raw)
+}
+
+fn decode_int(reg: Reg, raw: u16) -> Result<u16, XyError> {
+    decode_int_at(reg, reg.addr(), raw)
+}
+
+fn decode_int_at(reg: Reg, addr: u16, raw: u16) -> Result<u16, XyError> {
+    let Encoding::Int { min, max } = reg.encoding() else {
+        panic!("register is not an integer");
+    };
+    if raw >= min && raw <= max {
+        Ok(raw)
+    } else {
+        Err(XyError::InvalidRegisterValue {
+            register: addr,
+            value: raw,
+        })
+    }
+}
+
+fn decode_code<V>(
+    reg: Reg,
+    raw: u16,
+    decode: impl FnOnce(u16) -> Result<V, u16>,
+) -> Result<V, XyError> {
+    debug_assert!(matches!(reg.encoding(), Encoding::Code));
+    decode(raw).map_err(|value| XyError::InvalidRegisterValue {
+        register: reg.addr(),
+        value,
+    })
 }
 
 #[derive(Debug)]
@@ -100,21 +197,62 @@ struct RegisterWords {
     high: u16,
 }
 
-fn to_reg_u32(
-    v: f64,
-    scale: f64,
-    range: ValueRange,
-    field: InputField,
-) -> Result<RegisterWords, InputError> {
+/// Encode a physical value for `reg` against its declared limit.
+fn to_reg(reg: Reg, v: f32) -> Result<u16, InputError> {
+    let InputLimit::Scalar { min, max } = input_spec(reg).limit else {
+        panic!("register has no fixed scalar limit");
+    };
+    to_reg_within(reg, v, min, max)
+}
+
+/// Encode against caller-supplied bounds, for the registers whose ceiling is
+/// not fixed. The rejected-field name still comes from the register.
+fn to_reg_within(reg: Reg, v: f32, min: f32, max: f32) -> Result<u16, InputError> {
+    let field = input_spec(reg).field;
     if !v.is_finite() {
         return Err(InputError::NonFinite { field });
     }
-    let scaled = v * scale;
-    if !range.contains(v) || scaled > u32::MAX as f64 + 0.5 {
+    if v < min || v > max {
         return Err(InputError::OutOfRange { field });
     }
-    let raw = (scaled + 0.5) as u32;
-    if !range.contains(raw as f64 / scale) {
+    let scale = scale_of(reg);
+    // A limit that could overflow the register is a table error, not a caller
+    // error, so it asserts rather than returning.
+    debug_assert!(
+        max * scale <= u16::MAX as f32,
+        "write limit overflows the register"
+    );
+    let raw = (v * scale + 0.5) as u16;
+    // Rounding to the raw grid can cross a bound that does not itself sit on
+    // that grid. Every limit in `input_spec` is currently grid-aligned, so
+    // this is insurance against a future edit rather than a live path.
+    let encoded = raw as f32 / scale;
+    if encoded < min || encoded > max {
+        return Err(InputError::OutOfRange { field });
+    }
+    Ok(raw)
+}
+
+fn to_reg_wide(low: Reg, v: f64) -> Result<RegisterWords, InputError> {
+    let spec = input_spec(low);
+    let InputLimit::Wide { min, max } = spec.limit else {
+        panic!("register has no fixed wide limit");
+    };
+    let field = spec.field;
+    if !v.is_finite() {
+        return Err(InputError::NonFinite { field });
+    }
+    if v < min || v > max {
+        return Err(InputError::OutOfRange { field });
+    }
+    let scale = wide_scale_of(low);
+    debug_assert!(
+        max * scale <= u32::MAX as f64,
+        "write limit overflows the register pair"
+    );
+    let raw = (v * scale + 0.5) as u32;
+    let encoded = raw as f64 / scale;
+    if encoded < min || encoded > max {
         return Err(InputError::OutOfRange { field });
     }
     Ok(RegisterWords {
@@ -123,11 +261,19 @@ fn to_reg_u32(
     })
 }
 
-/// Offsets of V-SET and S-OVP within a memory group's 14 registers. A group's
-/// first two registers are its V-SET / I-SET; for M0 they are the live pair
-/// mirrored at [`REG_V_SET`] / [`REG_I_SET`].
-const GROUP_V_SET_OFFSET: usize = 0;
-const GROUP_S_OVP_OFFSET: usize = (REG_S_OVP - GROUP_BASE) as usize;
+/// Reject an integer input outside the register's own accepted range.
+fn validate_int(reg: Reg, value: u16) -> Result<(), InputError> {
+    let Encoding::Int { min, max } = reg.encoding() else {
+        panic!("register is not an integer");
+    };
+    if value >= min && value <= max {
+        Ok(())
+    } else {
+        Err(InputError::OutOfRange {
+            field: input_spec(reg).field,
+        })
+    }
+}
 
 /// The device latches OVP the moment a V-SET above the S-OVP threshold
 /// applies, so every path that moves either register checks the pair first.
@@ -151,38 +297,6 @@ fn validate_group(group: u8) -> Result<(), InputError> {
         Ok(())
     } else {
         Err(InputError::InvalidGroup { group })
-    }
-}
-
-fn validate_u16_max(value: u16, max: u16, field: InputField) -> Result<(), InputError> {
-    if value <= max {
-        Ok(())
-    } else {
-        Err(InputError::OutOfRange { field })
-    }
-}
-
-fn decode_bool(register: u16, value: u16) -> Result<bool, XyError> {
-    decode_register(register, value, |raw| match raw {
-        0 => Ok(false),
-        1 => Ok(true),
-        invalid => Err(invalid),
-    })
-}
-
-fn decode_register<T>(
-    register: u16,
-    value: u16,
-    decode: impl FnOnce(u16) -> Result<T, u16>,
-) -> Result<T, XyError> {
-    decode(value).map_err(|value| XyError::InvalidRegisterValue { register, value })
-}
-
-fn decode_u16_max(register: u16, value: u16, max: u16) -> Result<u16, XyError> {
-    if value <= max {
-        Ok(value)
-    } else {
-        Err(XyError::InvalidRegisterValue { register, value })
     }
 }
 
@@ -223,6 +337,7 @@ impl<T: ModbusTransport> Xy<T> {
     /// Read holding registers through the configured transport and slave.
     /// Empty destinations and slices longer than
     /// [`crate::framing::MAX_READ_REGS`] return [`RtuError::InvalidQuantity`].
+    /// Addresses come from [`Reg::addr`].
     pub fn read_raw_holding(&mut self, addr: u16, dst: &mut [u16]) -> Result<(), RtuError> {
         self.transport.read_holding(self.slave, addr, dst)
     }
@@ -237,11 +352,37 @@ impl<T: ModbusTransport> Xy<T> {
         self.transport
     }
 
+    /// Read one register's raw word, with no decoding and no range check.
+    ///
+    /// Use this to observe exactly what the device stores: the typed getters
+    /// apply the register's [`Encoding`] and reject a word outside it, which
+    /// is the wrong behaviour when the point is to watch firmware clamp.
+    /// [`Self::read_raw_holding`] remains for block reads and for addresses
+    /// this crate does not model.
+    pub fn read_word(&mut self, reg: Reg) -> Result<u16, XyError> {
+        let mut r = [0u16; 1];
+        self.transport
+            .read_holding(self.slave, reg.addr(), &mut r)?;
+        Ok(r[0])
+    }
+
+    /// Write one register's raw word, bypassing this crate's input validation
+    /// and the register's scale. Firmware clamping still applies.
+    pub fn write_word(&mut self, reg: Reg, value: u16) -> Result<(), XyError> {
+        self.transport
+            .write_single_holding(self.slave, reg.addr(), value)?;
+        Ok(())
+    }
+
     /// Read setpoints (V-SET, I-SET) — registers 0x0000–0x0001.
     pub fn read_setpoints(&mut self) -> Result<Setpoints, XyError> {
-        let mut r = [0u16; 2];
-        self.transport.read_holding(self.slave, REG_V_SET, &mut r)?;
-        Ok(decode_setpoints(r[0], r[1], CURRENT_SCALE))
+        const BASE: Reg = Reg::VSet;
+        const V_SET: usize = regs::offset_in(BASE, Reg::VSet);
+        const I_SET: usize = regs::offset_in(BASE, Reg::ISet);
+
+        let mut r = [0u16; regs::span(BASE, Reg::ISet)];
+        self.read_block(BASE, &mut r)?;
+        Ok(decode_setpoints(r[V_SET], r[I_SET]))
     }
 
     /// Read the live + control snapshot (registers 0x0000–0x0012) in
@@ -249,42 +390,42 @@ impl<T: ModbusTransport> Xy<T> {
     /// needs each tick (live readings, regulation mode, latched
     /// protection cause, output-enable flag) in one Modbus round-trip.
     pub fn read_status(&mut self) -> Result<Status, XyError> {
-        // Indexing below uses absolute register addresses as array offsets;
-        // adjacency + base-0 are pinned by the asserts in `regs.rs`.
-        const LEN: usize = REG_OUTPUT_EN as usize + 1;
-        let mut r = [0u16; LEN];
-        self.transport.read_holding(self.slave, REG_V_SET, &mut r)?;
+        const BASE: Reg = Reg::VSet;
+        const V_SET: usize = regs::offset_in(BASE, Reg::VSet);
+        const I_SET: usize = regs::offset_in(BASE, Reg::ISet);
+        const V_OUT: usize = regs::offset_in(BASE, Reg::VOut);
+        const I_OUT: usize = regs::offset_in(BASE, Reg::IOut);
+        const P_OUT: usize = regs::offset_in(BASE, Reg::POut);
+        const V_IN: usize = regs::offset_in(BASE, Reg::VIn);
+        const PROTECT: usize = regs::offset_in(BASE, Reg::Protect);
+        const CVCC: usize = regs::offset_in(BASE, Reg::Cvcc);
+        const OUTPUT_EN: usize = regs::offset_in(BASE, Reg::OutputEn);
+
+        let mut r = [0u16; regs::span(BASE, Reg::OutputEn)];
+        self.read_block(BASE, &mut r)?;
         Ok(Status {
-            setpoints: decode_setpoints(
-                r[REG_V_SET as usize],
-                r[REG_I_SET as usize],
-                CURRENT_SCALE,
-            ),
-            v_out: from_reg_u16(r[REG_V_OUT as usize], 100.0),
-            i_out: from_reg_u16(r[REG_I_OUT as usize], CURRENT_SCALE),
-            p_out: from_reg_u16(r[REG_P_OUT as usize], POWER_SCALE),
-            v_in: from_reg_u16(r[REG_V_IN as usize], 100.0),
-            protection: decode_register(
-                REG_PROTECT,
-                r[REG_PROTECT as usize],
-                ProtectionStatus::from_reg,
-            )?,
-            reg_mode: decode_register(REG_CVCC, r[REG_CVCC as usize], RegMode::from_reg)?,
-            output_on: decode_bool(REG_OUTPUT_EN, r[REG_OUTPUT_EN as usize])?,
+            setpoints: decode_setpoints(r[V_SET], r[I_SET]),
+            v_out: decode_scaled(Reg::VOut, r[V_OUT]),
+            i_out: decode_scaled(Reg::IOut, r[I_OUT]),
+            p_out: decode_scaled(Reg::POut, r[P_OUT]),
+            v_in: decode_scaled(Reg::VIn, r[V_IN]),
+            protection: decode_code(Reg::Protect, r[PROTECT], ProtectionStatus::from_reg)?,
+            reg_mode: decode_code(Reg::Cvcc, r[CVCC], RegMode::from_reg)?,
+            output_on: decode_flag(Reg::OutputEn, r[OUTPUT_EN])?,
         })
     }
 
     pub fn read_voltage_out(&mut self) -> Result<f32, XyError> {
-        Ok(from_reg_u16(self.read_one(REG_V_OUT)?, 100.0))
+        self.read_scaled(Reg::VOut)
     }
     pub fn read_current_out(&mut self) -> Result<f32, XyError> {
-        Ok(from_reg_u16(self.read_one(REG_I_OUT)?, CURRENT_SCALE))
+        self.read_scaled(Reg::IOut)
     }
     pub fn read_power_out(&mut self) -> Result<f32, XyError> {
-        Ok(from_reg_u16(self.read_one(REG_P_OUT)?, POWER_SCALE))
+        self.read_scaled(Reg::POut)
     }
     pub fn read_voltage_in(&mut self) -> Result<f32, XyError> {
-        Ok(from_reg_u16(self.read_one(REG_V_IN)?, 100.0))
+        self.read_scaled(Reg::VIn)
     }
 
     /// Read cumulative output charge, energy, and on-time (registers
@@ -293,16 +434,24 @@ impl<T: ModbusTransport> Xy<T> {
     /// XY7025 firmware has not been verified to snapshot the LOW/HIGH counter
     /// pairs atomically, so a read concurrent with low-word rollover may tear.
     pub fn read_totals(&mut self) -> Result<Totals, XyError> {
-        let mut r = [0u16; 7];
-        self.transport
-            .read_holding(self.slave, REG_AH_LOW, &mut r)?;
+        const BASE: Reg = Reg::AhLow;
+        const AH_LOW: usize = regs::offset_in(BASE, Reg::AhLow);
+        const AH_HIGH: usize = regs::offset_in(BASE, Reg::AhHigh);
+        const WH_LOW: usize = regs::offset_in(BASE, Reg::WhLow);
+        const WH_HIGH: usize = regs::offset_in(BASE, Reg::WhHigh);
+        const OUT_H: usize = regs::offset_in(BASE, Reg::OutH);
+        const OUT_M: usize = regs::offset_in(BASE, Reg::OutM);
+        const OUT_S: usize = regs::offset_in(BASE, Reg::OutS);
+
+        let mut r = [0u16; regs::span(BASE, Reg::OutS)];
+        self.read_block(BASE, &mut r)?;
         Ok(Totals {
-            charge_ah: from_reg_u32(r[0], r[1], 1000.0),
-            energy_wh: from_reg_u32(r[2], r[3], 1000.0),
+            charge_ah: decode_wide(Reg::AhLow, r[AH_LOW], r[AH_HIGH]),
+            energy_wh: decode_wide(Reg::WhLow, r[WH_LOW], r[WH_HIGH]),
             on_time: OnTime {
-                hours: r[4],
-                minutes: decode_u16_max(REG_OUT_M, r[5], 59)?,
-                seconds: decode_u16_max(REG_OUT_S, r[6], 59)?,
+                hours: decode_int(Reg::OutH, r[OUT_H])?,
+                minutes: decode_int(Reg::OutM, r[OUT_M])?,
+                seconds: decode_int(Reg::OutS, r[OUT_S])?,
             },
         })
     }
@@ -316,19 +465,14 @@ impl<T: ModbusTransport> Xy<T> {
     /// The read and the write are separate transactions, so a concurrent
     /// controller can still lower S-OVP in between.
     pub fn set_voltage(&mut self, volts: f32) -> Result<(), XyError> {
-        let raw = to_reg_u16(volts, 100.0, VOLTAGE_SET_RANGE, InputField::VoltageSetpoint)?;
-        check_v_set_under_ovp(raw, self.read_one(REG_S_OVP)?)?;
-        self.write_one(REG_V_SET, raw)
+        let raw = to_reg(Reg::VSet, volts)?;
+        check_v_set_under_ovp(raw, self.read_word(Reg::SOvp)?)?;
+        self.write_word(Reg::VSet, raw)
     }
 
     pub fn set_current_limit(&mut self, amps: f32) -> Result<(), XyError> {
-        let raw = to_reg_u16(
-            amps,
-            CURRENT_SCALE,
-            CURRENT_SET_RANGE,
-            InputField::CurrentSetpoint,
-        )?;
-        self.write_one(REG_I_SET, raw)
+        let raw = to_reg(Reg::ISet, amps)?;
+        self.write_word(Reg::ISet, raw)
     }
 
     /// Program LVP / OVP / OCP into the active group's protection
@@ -341,28 +485,28 @@ impl<T: ModbusTransport> Xy<T> {
     /// separate transactions, so a concurrent controller can still raise V-SET
     /// in between.
     pub fn set_protection(&mut self, l: SafetyLimits) -> Result<(), XyError> {
-        let lvp = to_reg_u16(l.lvp_v, 100.0, LVP_RANGE, InputField::LowVoltageProtection)?;
-        let ovp = to_reg_u16(l.ovp_v, 100.0, OVP_RANGE, InputField::OverVoltageProtection)?;
-        let ocp = to_reg_u16(
-            l.ocp_a,
-            CURRENT_SCALE,
-            OCP_RANGE,
-            InputField::OverCurrentProtection,
-        )?;
-        check_v_set_under_ovp(self.read_one(REG_V_SET)?, ovp)?;
+        let lvp = to_reg(Reg::SLvp, l.lvp_v)?;
+        let ovp = to_reg(Reg::SOvp, l.ovp_v)?;
+        let ocp = to_reg(Reg::SOcp, l.ocp_a)?;
+        check_v_set_under_ovp(self.read_word(Reg::VSet)?, ovp)?;
         self.transport
-            .write_multiple_holdings(self.slave, REG_S_LVP, &[lvp, ovp, ocp])?;
+            .write_multiple_holdings(self.slave, Reg::SLvp.addr(), &[lvp, ovp, ocp])?;
         Ok(())
     }
 
     /// Read LVP / OVP / OCP from the active group (0x0052–0x0054).
     pub fn read_protection(&mut self) -> Result<SafetyLimits, XyError> {
-        let mut r = [0u16; 3];
-        self.transport.read_holding(self.slave, REG_S_LVP, &mut r)?;
+        const BASE: Reg = Reg::SLvp;
+        const LVP: usize = regs::offset_in(BASE, Reg::SLvp);
+        const OVP: usize = regs::offset_in(BASE, Reg::SOvp);
+        const OCP: usize = regs::offset_in(BASE, Reg::SOcp);
+
+        let mut r = [0u16; regs::span(BASE, Reg::SOcp)];
+        self.read_block(BASE, &mut r)?;
         Ok(SafetyLimits {
-            lvp_v: from_reg_u16(r[0], 100.0),
-            ovp_v: from_reg_u16(r[1], 100.0),
-            ocp_a: from_reg_u16(r[2], CURRENT_SCALE),
+            lvp_v: decode_scaled(Reg::SLvp, r[LVP]),
+            ovp_v: decode_scaled(Reg::SOvp, r[OVP]),
+            ocp_a: decode_scaled(Reg::SOcp, r[OCP]),
         })
     }
 
@@ -371,80 +515,73 @@ impl<T: ModbusTransport> Xy<T> {
     /// default after an unexpected power loss — the buck stays disabled
     /// until explicitly re-enabled.
     pub fn set_power_on_output(&mut self, on: bool) -> Result<(), XyError> {
-        self.write_one(REG_S_INI, on as u16)
+        self.write_word(Reg::SIni, on as u16)
     }
 
     pub fn read_power_on_output(&mut self) -> Result<bool, XyError> {
-        let value = self.read_one(REG_S_INI)?;
-        decode_bool(REG_S_INI, value)
+        self.read_flag(Reg::SIni)
     }
 
     /// Read the output-enable register (ONOFF, 0x0012).
     pub fn read_output(&mut self) -> Result<bool, XyError> {
-        let value = self.read_one(REG_OUTPUT_EN)?;
-        decode_bool(REG_OUTPUT_EN, value)
+        self.read_flag(Reg::OutputEn)
     }
 
     pub fn set_output(&mut self, on: bool) -> Result<(), XyError> {
-        self.write_one(REG_OUTPUT_EN, on as u16)
+        self.write_word(Reg::OutputEn, on as u16)
     }
 
     /// Read the latched protection cause (PROTECT, 0x0010). While the
     /// output is on, this register is necessarily `Normal` — only worth
     /// reading after observing OUTPUT_EN go low.
     pub fn read_protection_status(&mut self) -> Result<ProtectionStatus, XyError> {
-        let value = self.read_one(REG_PROTECT)?;
-        decode_register(REG_PROTECT, value, ProtectionStatus::from_reg)
+        self.read_code(Reg::Protect, ProtectionStatus::from_reg)
     }
 
     /// Clear a latched protection cause (write 0 to PROTECT). This
     /// stops the front-panel blink but does **not** re-enable the
     /// output — call [`Self::set_output`] separately.
     pub fn clear_protection_status(&mut self) -> Result<(), XyError> {
-        self.write_one(REG_PROTECT, 0)
+        self.write_word(Reg::Protect, 0)
     }
 
     pub fn read_reg_mode(&mut self) -> Result<RegMode, XyError> {
-        let value = self.read_one(REG_CVCC)?;
-        decode_register(REG_CVCC, value, RegMode::from_reg)
+        self.read_code(Reg::Cvcc, RegMode::from_reg)
     }
 
     /// Read the verified internal sensor and its unit in one register snapshot.
-    /// The reading is two's-complement signed, so sub-zero ambients decode
+    /// [`Reg::TIn`] is two's-complement signed, so sub-zero ambients decode
     /// correctly.
     ///
     /// The external-probe register remains available through
     /// [`Self::read_raw_holding`], but is not exposed at the high level because
-    /// its connected-probe scale has not been verified on hardware. It is
-    /// signed on the same basis as this one — decode it as `i16`, not `u16`.
+    /// its connected-probe scale has not been verified on hardware. [`Reg::TEx`]
+    /// records that it is signed on the same basis as this one.
     pub fn read_temperature_internal(&mut self) -> Result<Temperature, XyError> {
-        const LEN: usize = (REG_TEMP_UNIT - REG_T_IN + 1) as usize;
-        let mut r = [0u16; LEN];
-        self.transport.read_holding(self.slave, REG_T_IN, &mut r)?;
-        let unit = decode_register(
-            REG_TEMP_UNIT,
-            r[(REG_TEMP_UNIT - REG_T_IN) as usize],
-            TempUnit::from_reg,
-        )?;
+        const BASE: Reg = Reg::TIn;
+        const T_IN: usize = regs::offset_in(BASE, Reg::TIn);
+        const TEMP_UNIT: usize = regs::offset_in(BASE, Reg::TempUnit);
+
+        let mut r = [0u16; regs::span(BASE, Reg::TempUnit)];
+        self.read_block(BASE, &mut r)?;
         Ok(Temperature {
-            value: from_reg_i16(r[0], 10.0),
-            unit,
+            value: decode_scaled(Reg::TIn, r[T_IN]),
+            unit: decode_code(Reg::TempUnit, r[TEMP_UNIT], TempUnit::from_reg)?,
         })
     }
 
     pub fn read_temp_unit(&mut self) -> Result<TempUnit, XyError> {
-        let value = self.read_one(REG_TEMP_UNIT)?;
-        decode_register(REG_TEMP_UNIT, value, TempUnit::from_reg)
+        self.read_code(Reg::TempUnit, TempUnit::from_reg)
     }
     pub fn set_temp_unit(&mut self, unit: TempUnit) -> Result<(), XyError> {
-        self.write_one(REG_TEMP_UNIT, unit.code())
+        self.write_word(Reg::TempUnit, unit.code())
     }
 
     pub fn read_temp_offset_internal(&mut self) -> Result<f32, XyError> {
-        Ok(from_reg_i16(self.read_one(REG_T_IN_OFFSET)?, 10.0))
+        self.read_scaled(Reg::TInOffset)
     }
     pub fn read_temp_offset_external(&mut self) -> Result<f32, XyError> {
-        Ok(from_reg_i16(self.read_one(REG_T_EX_OFFSET)?, 10.0))
+        self.read_scaled(Reg::TExOffset)
     }
     // Setters intentionally absent: XY7025 firmware silently ignores
     // Modbus writes to T-IN/T-EX offset (verified empirically — every
@@ -453,63 +590,47 @@ impl<T: ModbusTransport> Xy<T> {
     // would lie about success. Use the front panel instead.
 
     pub fn read_lock(&mut self) -> Result<bool, XyError> {
-        let value = self.read_one(REG_LOCK)?;
-        decode_bool(REG_LOCK, value)
+        self.read_flag(Reg::Lock)
     }
     pub fn set_lock(&mut self, locked: bool) -> Result<(), XyError> {
-        self.write_one(REG_LOCK, locked as u16)
+        self.write_word(Reg::Lock, locked as u16)
     }
 
     /// Backlight brightness (1–5).
     pub fn read_backlight(&mut self) -> Result<u8, XyError> {
-        let value = self.read_one(REG_BACKLIGHT)?;
-        if (1..=5).contains(&value) {
-            Ok(value as u8)
-        } else {
-            Err(XyError::InvalidRegisterValue {
-                register: REG_BACKLIGHT,
-                value,
-            })
-        }
+        Ok(self.read_int(Reg::Backlight)? as u8)
     }
     /// Set backlight brightness. Documented range is 0–5, but XY7025
     /// firmware floors writes at 1 (writing 0 reads back as 1) — the
-    /// display can't be fully extinguished via Modbus.
+    /// display can't be fully extinguished via Modbus, so 0 is rejected.
     pub fn set_backlight(&mut self, level: u8) -> Result<(), XyError> {
-        if !(1..=5).contains(&level) {
-            return Err(InputError::OutOfRange {
-                field: InputField::Backlight,
-            }
-            .into());
-        }
-        self.write_one(REG_BACKLIGHT, level as u16)
+        validate_int(Reg::Backlight, level as u16)?;
+        self.write_word(Reg::Backlight, level as u16)
     }
 
     /// Off-screen timeout in minutes.
     pub fn read_sleep_minutes(&mut self) -> Result<u16, XyError> {
-        let value = self.read_one(REG_SLEEP)?;
-        decode_u16_max(REG_SLEEP, value, 9)
+        self.read_int(Reg::Sleep)
     }
     /// Set off-screen timeout in minutes. XY7025 firmware caps the
     /// stored value at 9; any write ≥10 reads back as 9. Pass 0 to
     /// disable auto-off.
     pub fn set_sleep_minutes(&mut self, minutes: u16) -> Result<(), XyError> {
-        validate_u16_max(minutes, 9, InputField::SleepTimeout)?;
-        self.write_one(REG_SLEEP, minutes)
+        validate_int(Reg::Sleep, minutes)?;
+        self.write_word(Reg::Sleep, minutes)
     }
 
     /// Buzzer enable. Often unimplemented in firmware.
     pub fn read_buzzer(&mut self) -> Result<bool, XyError> {
-        let value = self.read_one(REG_BUZZER)?;
-        decode_bool(REG_BUZZER, value)
+        self.read_flag(Reg::Buzzer)
     }
     pub fn set_buzzer(&mut self, on: bool) -> Result<(), XyError> {
-        self.write_one(REG_BUZZER, on as u16)
+        self.write_word(Reg::Buzzer, on as u16)
     }
 
     /// Product number (e.g. `0x6500` on XY7025).
     pub fn read_model(&mut self) -> Result<u16, XyError> {
-        self.read_one(REG_MODEL)
+        self.read_word(Reg::Model)
     }
 
     /// Read the device's `MODEL` register and check whether it belongs to the
@@ -529,44 +650,35 @@ impl<T: ModbusTransport> Xy<T> {
 
     /// Firmware version (e.g. `0x0071`).
     pub fn read_version(&mut self) -> Result<u16, XyError> {
-        self.read_one(REG_VERSION)
+        self.read_word(Reg::Version)
     }
 
     /// Read the device's currently configured Modbus slave address.
     /// It may briefly differ from the address used by this driver while
     /// reconfiguring.
     pub fn read_slave_address(&mut self) -> Result<u8, XyError> {
-        let value = self.read_one(REG_SLAVE_ADDR)?;
-        let address = u8::try_from(value).map_err(|_| XyError::InvalidRegisterValue {
-            register: REG_SLAVE_ADDR,
-            value,
-        })?;
-        validate_slave(address).map_err(|_| XyError::InvalidRegisterValue {
-            register: REG_SLAVE_ADDR,
-            value,
-        })?;
-        Ok(address)
+        // `Reg::SlaveAddr` declares 1..=247, so the cast cannot truncate.
+        Ok(self.read_int(Reg::SlaveAddr)? as u8)
     }
     /// Write a new slave address. Takes effect after the device resets.
     pub fn set_slave_address(&mut self, addr: u8) -> Result<(), XyError> {
         validate_slave(addr)?;
-        self.write_one(REG_SLAVE_ADDR, addr as u16)
+        self.write_word(Reg::SlaveAddr, addr as u16)
     }
 
     pub fn read_baud_rate(&mut self) -> Result<BaudRate, XyError> {
-        let value = self.read_one(REG_BAUD_CODE)?;
-        decode_register(REG_BAUD_CODE, value, BaudRate::from_code)
+        self.read_code(Reg::BaudCode, BaudRate::from_code)
     }
     /// Write a new baud-rate code. Takes effect after the device resets.
     pub fn set_baud_rate(&mut self, baud: BaudRate) -> Result<(), XyError> {
-        self.write_one(REG_BAUD_CODE, baud.code())
+        self.write_word(Reg::BaudCode, baud.code())
     }
 
     /// Recall a stored memory group (M0–M9) into the live operating set.
     /// `n == 0` is a no-op on the device (M0 is already current).
     pub fn recall_group(&mut self, n: u8) -> Result<(), XyError> {
         validate_group(n)?;
-        self.write_one(REG_EXTRACT_M, n as u16)
+        self.write_word(Reg::ExtractM, n as u16)
     }
 
     /// Read all 14 registers of memory group `n` (0–9).
@@ -580,8 +692,8 @@ impl<T: ModbusTransport> Xy<T> {
     }
 
     fn read_group_in_unit(&mut self, n: u8, unit: TempUnit) -> Result<GroupParams, XyError> {
-        let mut r = [0u16; GROUP_LEN as usize];
-        let addr = group_addr(n);
+        let mut r = [0u16; GROUP_LEN];
+        let addr = regs::group_addr(n);
         self.transport.read_holding(self.slave, addr, &mut r)?;
         decode_group(&r, addr, unit)
     }
@@ -600,88 +712,86 @@ impl<T: ModbusTransport> Xy<T> {
     /// F-C must not be changed concurrently through another controller or the
     /// front panel while this operation is in progress.
     pub fn write_group(&mut self, n: u8, p: &GroupParams) -> Result<GroupParams, XyError> {
+        const V_SET: usize = regs::group_offset(Reg::VSet);
+        const S_OVP: usize = regs::group_offset(Reg::SOvp);
+
         validate_group(n)?;
         let encoding = encode_group(p)?;
         let unit = self.read_temp_unit()?;
-        let regs = encoding.for_unit(unit)?;
+        let words = encoding.for_unit(unit)?;
         if n == 0 {
             // V-SET and S-OVP are three registers apart, so one read of the
             // span costs less than two single-register transactions.
-            let mut current = [0u16; GROUP_S_OVP_OFFSET + 1];
+            let mut current = [0u16; S_OVP + 1];
             self.transport
                 .read_holding(self.slave, GROUP_BASE, &mut current)?;
             // Either register may land first, so both pairings must clear.
-            check_v_set_under_ovp(regs[GROUP_V_SET_OFFSET], current[GROUP_S_OVP_OFFSET])?;
-            check_v_set_under_ovp(current[GROUP_V_SET_OFFSET], regs[GROUP_S_OVP_OFFSET])?;
+            check_v_set_under_ovp(words[V_SET], current[S_OVP])?;
+            check_v_set_under_ovp(current[V_SET], words[S_OVP])?;
         }
         self.transport
-            .write_multiple_holdings(self.slave, group_addr(n), &regs)?;
+            .write_multiple_holdings(self.slave, regs::group_addr(n), &words)?;
         self.read_group_in_unit(n, unit)
     }
 
-    fn read_one(&mut self, addr: u16) -> Result<u16, XyError> {
-        let mut r = [0u16; 1];
-        self.transport.read_holding(self.slave, addr, &mut r)?;
-        Ok(r[0])
+    fn read_block(&mut self, base: Reg, dst: &mut [u16]) -> Result<(), XyError> {
+        self.transport.read_holding(self.slave, base.addr(), dst)?;
+        Ok(())
     }
 
-    fn write_one(&mut self, addr: u16, value: u16) -> Result<(), XyError> {
-        self.transport
-            .write_single_holding(self.slave, addr, value)?;
-        Ok(())
+    fn read_scaled(&mut self, reg: Reg) -> Result<f32, XyError> {
+        Ok(decode_scaled(reg, self.read_word(reg)?))
+    }
+
+    fn read_flag(&mut self, reg: Reg) -> Result<bool, XyError> {
+        decode_flag(reg, self.read_word(reg)?)
+    }
+
+    fn read_int(&mut self, reg: Reg) -> Result<u16, XyError> {
+        decode_int(reg, self.read_word(reg)?)
+    }
+
+    fn read_code<V>(
+        &mut self,
+        reg: Reg,
+        decode: impl FnOnce(u16) -> Result<V, u16>,
+    ) -> Result<V, XyError> {
+        decode_code(reg, self.read_word(reg)?, decode)
     }
 }
 
-fn decode_group(
-    r: &[u16; GROUP_LEN as usize],
-    addr: u16,
-    unit: TempUnit,
-) -> Result<GroupParams, XyError> {
-    let [
-        v_set,
-        i_set,
-        s_lvp,
-        s_ovp,
-        s_ocp,
-        s_opp,
-        s_ohp_h,
-        s_ohp_m,
-        s_oah_low,
-        s_oah_high,
-        s_owh_low,
-        s_owh_high,
-        s_otp,
-        s_ini,
-    ] = *r;
+fn decode_group(r: &[u16; GROUP_LEN], addr: u16, unit: TempUnit) -> Result<GroupParams, XyError> {
+    let word = |reg: Reg| r[regs::group_offset(reg)];
+    let at = |reg: Reg| addr + regs::group_offset(reg) as u16;
     Ok(GroupParams {
-        setpoints: decode_setpoints(v_set, i_set, CURRENT_SCALE),
+        setpoints: decode_setpoints(word(Reg::VSet), word(Reg::ISet)),
         safety_limits: SafetyLimits {
-            lvp_v: from_reg_u16(s_lvp, 100.0),
-            ovp_v: from_reg_u16(s_ovp, 100.0),
-            ocp_a: from_reg_u16(s_ocp, CURRENT_SCALE),
+            lvp_v: decode_scaled(Reg::SLvp, word(Reg::SLvp)),
+            ovp_v: decode_scaled(Reg::SOvp, word(Reg::SOvp)),
+            ocp_a: decode_scaled(Reg::SOcp, word(Reg::SOcp)),
         },
-        s_opp_w: from_reg_u16(s_opp, OPP_SCALE),
-        s_ohp_h: decode_u16_max(addr + 6, s_ohp_h, 99)?,
-        s_ohp_m: decode_u16_max(addr + 7, s_ohp_m, 59)?,
-        s_oah_ah: from_reg_u32(s_oah_low, s_oah_high, 1000.0),
-        s_owh_wh: from_reg_u32(s_owh_low, s_owh_high, 100.0),
+        s_opp_w: decode_scaled(Reg::SOpp, word(Reg::SOpp)),
+        s_ohp_h: decode_int_at(Reg::SOhpH, at(Reg::SOhpH), word(Reg::SOhpH))?,
+        s_ohp_m: decode_int_at(Reg::SOhpM, at(Reg::SOhpM), word(Reg::SOhpM))?,
+        s_oah_ah: decode_wide(Reg::SOahLow, word(Reg::SOahLow), word(Reg::SOahHigh)),
+        s_owh_wh: decode_wide(Reg::SOwhLow, word(Reg::SOwhLow), word(Reg::SOwhHigh)),
         s_otp: Temperature {
-            value: from_reg_u16(s_otp, 1.0),
+            value: decode_scaled(Reg::SOtp, word(Reg::SOtp)),
             unit,
         },
-        power_on_output: decode_bool(addr + 13, s_ini)?,
+        power_on_output: decode_flag_at(Reg::SIni, at(Reg::SIni), word(Reg::SIni))?,
     })
 }
 
 #[derive(Debug)]
 struct GroupEncoding {
-    values: [u16; GROUP_LEN as usize],
+    values: [u16; GROUP_LEN],
     s_otp: Temperature,
 }
 
 impl GroupEncoding {
-    fn for_unit(mut self, unit: TempUnit) -> Result<[u16; GROUP_LEN as usize], InputError> {
-        self.values[12] = encode_group_otp(self.s_otp, unit)?;
+    fn for_unit(mut self, unit: TempUnit) -> Result<[u16; GROUP_LEN], InputError> {
+        self.values[regs::group_offset(Reg::SOtp)] = encode_group_otp(self.s_otp, unit)?;
         Ok(self.values)
     }
 }
@@ -692,85 +802,48 @@ fn encode_group(p: &GroupParams) -> Result<GroupEncoding, InputError> {
             field: InputField::OverTemperatureProtection,
         });
     }
-    validate_u16_max(p.s_ohp_h, 99, InputField::OutputTimeHours)?;
-    validate_u16_max(p.s_ohp_m, 59, InputField::OutputTimeMinutes)?;
-    let oah = to_reg_u32(
-        p.s_oah_ah,
-        1000.0,
-        CHARGE_LIMIT_RANGE,
-        InputField::ChargeLimit,
+    validate_int(Reg::SOhpH, p.s_ohp_h)?;
+    validate_int(Reg::SOhpM, p.s_ohp_m)?;
+    let oah = to_reg_wide(Reg::SOahLow, p.s_oah_ah)?;
+    let owh = to_reg_wide(Reg::SOwhLow, p.s_owh_wh)?;
+
+    // Assigned by register rather than as a positional literal, so wire order
+    // is stated once, in `regs::GROUP_WORDS`. S-OTP is left for `for_unit`,
+    // which needs the displayed temperature unit.
+    let mut values = [0u16; GROUP_LEN];
+    values[regs::group_offset(Reg::VSet)] = to_reg(Reg::VSet, p.setpoints.v_set)?;
+    values[regs::group_offset(Reg::ISet)] = to_reg(Reg::ISet, p.setpoints.i_set)?;
+    values[regs::group_offset(Reg::SLvp)] = to_reg(Reg::SLvp, p.safety_limits.lvp_v)?;
+    values[regs::group_offset(Reg::SOvp)] = to_reg(Reg::SOvp, p.safety_limits.ovp_v)?;
+    values[regs::group_offset(Reg::SOcp)] = to_reg(Reg::SOcp, p.safety_limits.ocp_a)?;
+    values[regs::group_offset(Reg::SOpp)] = to_reg(Reg::SOpp, p.s_opp_w)?;
+    values[regs::group_offset(Reg::SOhpH)] = p.s_ohp_h;
+    values[regs::group_offset(Reg::SOhpM)] = p.s_ohp_m;
+    values[regs::group_offset(Reg::SOahLow)] = oah.low;
+    values[regs::group_offset(Reg::SOahHigh)] = oah.high;
+    values[regs::group_offset(Reg::SOwhLow)] = owh.low;
+    values[regs::group_offset(Reg::SOwhHigh)] = owh.high;
+    values[regs::group_offset(Reg::SIni)] = p.power_on_output as u16;
+
+    check_v_set_under_ovp(
+        values[regs::group_offset(Reg::VSet)],
+        values[regs::group_offset(Reg::SOvp)],
     )?;
-    let owh = to_reg_u32(
-        p.s_owh_wh,
-        100.0,
-        ENERGY_LIMIT_RANGE,
-        InputField::EnergyLimit,
-    )?;
-    let values = [
-        to_reg_u16(
-            p.setpoints.v_set,
-            100.0,
-            VOLTAGE_SET_RANGE,
-            InputField::VoltageSetpoint,
-        )?,
-        to_reg_u16(
-            p.setpoints.i_set,
-            CURRENT_SCALE,
-            CURRENT_SET_RANGE,
-            InputField::CurrentSetpoint,
-        )?,
-        to_reg_u16(
-            p.safety_limits.lvp_v,
-            100.0,
-            LVP_RANGE,
-            InputField::LowVoltageProtection,
-        )?,
-        to_reg_u16(
-            p.safety_limits.ovp_v,
-            100.0,
-            OVP_RANGE,
-            InputField::OverVoltageProtection,
-        )?,
-        to_reg_u16(
-            p.safety_limits.ocp_a,
-            CURRENT_SCALE,
-            OCP_RANGE,
-            InputField::OverCurrentProtection,
-        )?,
-        to_reg_u16(
-            p.s_opp_w,
-            OPP_SCALE,
-            OPP_RANGE,
-            InputField::OverPowerProtection,
-        )?,
-        p.s_ohp_h,
-        p.s_ohp_m,
-        oah.low,
-        oah.high,
-        owh.low,
-        owh.high,
-        0,
-        p.power_on_output as u16,
-    ];
-    check_v_set_under_ovp(values[GROUP_V_SET_OFFSET], values[GROUP_S_OVP_OFFSET])?;
     Ok(GroupEncoding {
         values,
         s_otp: p.s_otp,
     })
 }
 
+/// Group writes route S-OTP through firmware unit conversion, which clamps at
+/// 110 °C / 230 °F. The ceiling therefore depends on the displayed unit.
 fn encode_group_otp(temperature: Temperature, unit: TempUnit) -> Result<u16, InputError> {
     let temperature = temperature.convert_to(unit);
     let max = match unit {
         TempUnit::Celsius => 110.0,
         TempUnit::Fahrenheit => 230.0,
     };
-    to_reg_u16(
-        temperature.value,
-        1.0,
-        ValueRange { min: 0.0, max },
-        InputField::OverTemperatureProtection,
-    )
+    to_reg_within(Reg::SOtp, temperature.value, 0.0, max)
 }
 
 #[cfg(test)]

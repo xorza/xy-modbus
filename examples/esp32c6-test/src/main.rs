@@ -24,18 +24,20 @@ use esp_idf_hal::uart::UartDriver;
 use esp_idf_hal::uart::config::Config;
 use esp_idf_hal::units::Hertz;
 
+use xy_modbus::regs;
+use xy_modbus::regs::Reg;
 use xy_modbus::{
     GroupParams, ProtectionStatus, SafetyLimits, ScaleCheck, Setpoints, TempUnit, Temperature, Xy,
 };
 
 const BAUD: u32 = 115200;
-const GROUP_BASE: u16 = 0x0050;
-const GROUP_STRIDE: u16 = 0x0010;
-const GROUP_COUNT: usize = 10;
-const GROUP_REGISTER_COUNT: usize = 14;
+/// Group count as an array length; the crate types it as a `u8` register value.
+const GROUP_COUNT: usize = regs::GROUP_COUNT as usize;
 
-// V_OUT 0–70 V, I_OUT 0–25 A, resolution 0.01.
-// OVP 0–72, OCP 0–27, OPP 0–2000, LVP 10–95, OTP 0–110.
+// Hand copy of `device::input_spec`, which is private: V_OUT 0–70 V,
+// I_OUT 0–25 A at 0.01 resolution; OVP 0–72, OCP 0–27, OPP 0–2000, LVP 10–95,
+// OTP 0–110. Update alongside that table — the sweeps below are derived from
+// these numbers and will silently stop probing the boundary if it moves.
 
 const V_SET_SAMPLES: &[f32] = &[
     0.00, 0.01, 0.05, 0.10, 0.50, 1.00, 3.30, 5.00, 7.50, 10.00, 12.00, 12.34, 13.50, 14.40, 19.99,
@@ -226,13 +228,13 @@ struct Snapshot {
     backlight: u8,
     sleep_minutes: u16,
     buzzer: bool,
-    groups: [[u16; GROUP_REGISTER_COUNT]; GROUP_COUNT],
+    groups: [[u16; regs::GROUP_LEN]; GROUP_COUNT],
 }
 
 fn snapshot_all<'d>(xy: &mut T<'d>) -> Result<Snapshot, String> {
-    let mut groups = [[0; GROUP_REGISTER_COUNT]; GROUP_COUNT];
+    let mut groups = [[0; regs::GROUP_LEN]; GROUP_COUNT];
     for (n, slot) in groups.iter_mut().enumerate() {
-        xy.read_raw_holding(group_address(n), slot)
+        xy.read_raw_holding(regs::group_addr(n as u8), slot)
             .map_err(driver_error)?;
     }
     Ok(Snapshot {
@@ -336,17 +338,7 @@ fn prepare_safe_baseline(xy: &mut T) -> Result<(), String> {
     xy.set_protection(HEADROOM_SAFETY).map_err(driver_error)
 }
 
-fn group_address(n: usize) -> u16 {
-    debug_assert!(n < GROUP_COUNT);
-    GROUP_BASE + n as u16 * GROUP_STRIDE
-}
-
-fn restore_group(
-    xy: &mut T,
-    n: usize,
-    words: &[u16; GROUP_REGISTER_COUNT],
-    errors: &mut Vec<String>,
-) {
+fn restore_group(xy: &mut T, n: usize, words: &[u16; regs::GROUP_LEN], errors: &mut Vec<String>) {
     if n == 0 {
         // Restore live protection before V_SET so an OVP crossing cannot trip.
         for (offset, &word) in words.iter().enumerate().skip(2) {
@@ -362,18 +354,14 @@ fn restore_group(
     }
 }
 
-fn restore_group_exact(
-    xy: &mut T,
-    n: usize,
-    words: &[u16; GROUP_REGISTER_COUNT],
-) -> Result<(), String> {
+fn restore_group_exact(xy: &mut T, n: usize, words: &[u16; regs::GROUP_LEN]) -> Result<(), String> {
     let mut errors = Vec::new();
     restore_group(xy, n, words, &mut errors);
-    let mut actual = [0; GROUP_REGISTER_COUNT];
+    let mut actual = [0; regs::GROUP_LEN];
     record_restore(
         &mut errors,
         &format!("verify restored M{n}"),
-        xy.read_raw_holding(group_address(n), &mut actual)
+        xy.read_raw_holding(regs::group_addr(n as u8), &mut actual)
             .map_err(driver_error)
             .and_then(|()| expect_eq(&format!("M{n} raw restore"), *words, actual)),
     );
@@ -389,7 +377,7 @@ fn restore_group_word(xy: &mut T, n: usize, offset: usize, word: u16, errors: &m
     record_restore(
         errors,
         &label,
-        xy.write_raw_holding(group_address(n) + offset as u16, word)
+        xy.write_raw_holding(regs::group_addr(n as u8) + offset as u16, word)
             .map_err(driver_error),
     );
 }
@@ -438,9 +426,9 @@ fn verify_restoration(xy: &mut T, s: &Snapshot, errors: &mut Vec<String>) {
             .and_then(|actual| expect_eq("BUZZER", s.buzzer, actual)),
     );
     for n in 0..GROUP_COUNT {
-        let mut actual = [0; GROUP_REGISTER_COUNT];
+        let mut actual = [0; regs::GROUP_LEN];
         let result = xy
-            .read_raw_holding(group_address(n), &mut actual)
+            .read_raw_holding(regs::group_addr(n as u8), &mut actual)
             .map_err(driver_error)
             .and_then(|()| expect_eq(&format!("M{n} raw snapshot"), s.groups[n], actual));
         record_restore(errors, &format!("verify M{n}"), result);
@@ -570,8 +558,8 @@ fn test_status_consistency(xy: &mut T) -> Result<(), String> {
 
 fn test_totals(xy: &mut T) -> Result<(), String> {
     let t = xy.read_totals().map_err(driver_error)?;
-    let mut raw = [0u16; 7];
-    xy.read_raw_holding(0x0006, &mut raw)
+    let mut raw = [0u16; regs::span(Reg::AhLow, Reg::OutS)];
+    xy.read_raw_holding(Reg::AhLow.addr(), &mut raw)
         .map_err(driver_error)?;
     let charge_raw = ((raw[1] as u32) << 16) | raw[0] as u32;
     let energy_raw = ((raw[3] as u32) << 16) | raw[2] as u32;
@@ -740,8 +728,8 @@ fn test_temp_offsets_read_only(xy: &mut T) -> Result<(), String> {
     // probe below covers the firmware no-op behavior at the wire level.
     let int_off = xy.read_temp_offset_internal().map_err(driver_error)?;
     let ext_off = xy.read_temp_offset_external().map_err(driver_error)?;
-    let mut raw = [0u16; 2];
-    xy.read_raw_holding(0x001A, &mut raw)
+    let mut raw = [0u16; regs::span(Reg::TInOffset, Reg::TExOffset)];
+    xy.read_raw_holding(Reg::TInOffset.addr(), &mut raw)
         .map_err(driver_error)?;
     expect_precise(
         "T_INT_OFFSET raw decode",
@@ -775,7 +763,7 @@ fn test_backlight_full_range(xy: &mut T) -> Result<(), String> {
             xy.read_backlight().map_err(driver_error)?,
         )?;
     }
-    xy.write_raw_holding(0x0014, 0).map_err(driver_error)?;
+    xy.write_word(Reg::Backlight, 0).map_err(driver_error)?;
     let after_zero = xy.read_backlight().map_err(driver_error)?;
     if after_zero != 1 {
         return Err(format!(
@@ -794,7 +782,7 @@ fn test_sleep_minutes_sweep(xy: &mut T) -> Result<(), String> {
             xy.read_sleep_minutes().map_err(driver_error)?,
         )?;
     }
-    xy.write_raw_holding(0x0015, 60).map_err(driver_error)?;
+    xy.write_word(Reg::Sleep, 60).map_err(driver_error)?;
     let clamped = xy.read_sleep_minutes().map_err(driver_error)?;
     if clamped != 9 {
         return Err(format!(
@@ -877,17 +865,13 @@ fn test_lifecycle(xy: T<'static>) -> Result<(), String> {
 /// Verifies the empirically established scale-1 S-OTP behavior through
 /// single-register writes, which bypass group-write conversion and clamps.
 fn test_s_otp_raw_probe(xy: &mut T) -> Result<(), String> {
-    const REG_S_OTP_M0: u16 = 0x005C;
-
     let original_unit = xy.read_temp_unit().map_err(driver_error)?;
     info!("  device unit at probe start: {original_unit:?}");
 
-    let mut original = [0u16; 1];
-    xy.read_raw_holding(REG_S_OTP_M0, &mut original)
-        .map_err(driver_error)?;
+    let original = xy.read_word(Reg::SOtp).map_err(driver_error)?;
     info!(
         "  S-OTP M0 raw original = {} (in {original_unit:?})",
-        original[0]
+        original
     );
 
     let probes: &[u16] = &[10, 50, 80, 95, 100, 110, 150, 200, 230, 500, 950, 1100];
@@ -897,13 +881,10 @@ fn test_s_otp_raw_probe(xy: &mut T) -> Result<(), String> {
             xy.set_temp_unit(unit).map_err(driver_error)?;
             info!("  --- probing in {unit:?} ---");
             for &raw in probes {
-                xy.write_raw_holding(REG_S_OTP_M0, raw)
-                    .map_err(driver_error)?;
-                let mut got = [0u16; 1];
-                xy.read_raw_holding(REG_S_OTP_M0, &mut got)
-                    .map_err(driver_error)?;
-                expect_eq(&format!("S-OTP {unit:?} raw {raw}"), raw, got[0])?;
-                info!("    S-OTP write raw {raw:>4} -> read raw {}", got[0]);
+                xy.write_word(Reg::SOtp, raw).map_err(driver_error)?;
+                let got = xy.read_word(Reg::SOtp).map_err(driver_error)?;
+                expect_eq(&format!("S-OTP {unit:?} raw {raw}"), raw, got)?;
+                info!("    S-OTP write raw {raw:>4} -> read raw {}", got);
             }
         }
         Ok(())
@@ -911,82 +892,59 @@ fn test_s_otp_raw_probe(xy: &mut T) -> Result<(), String> {
 
     let cleanup = (|| {
         xy.set_temp_unit(original_unit).map_err(driver_error)?;
-        xy.write_raw_holding(REG_S_OTP_M0, original[0])
-            .map_err(driver_error)?;
-        let mut verify = [0u16; 1];
-        xy.read_raw_holding(REG_S_OTP_M0, &mut verify)
-            .map_err(driver_error)?;
-        expect_eq("S-OTP restore", original[0], verify[0])
+        xy.write_word(Reg::SOtp, original).map_err(driver_error)?;
+        let verify = xy.read_word(Reg::SOtp).map_err(driver_error)?;
+        expect_eq("S-OTP restore", original, verify)
     })();
     finish_with_cleanup(result, cleanup, "S-OTP cleanup")
 }
 
 /// Verifies that XY7025 firmware ignores Modbus writes to T-IN-OFFSET.
 fn test_temp_offset_raw_probe(xy: &mut T) -> Result<(), String> {
-    const REG_T_IN_OFFSET: u16 = 0x001A;
-    let mut original = [0u16; 1];
-    xy.read_raw_holding(REG_T_IN_OFFSET, &mut original)
-        .map_err(driver_error)?;
-    info!("  T-IN-OFFSET raw original = {}", original[0]);
+    let original = xy.read_word(Reg::TInOffset).map_err(driver_error)?;
+    info!("  T-IN-OFFSET raw original = {}", original);
 
     let probes: &[u16] = &[0, 1, 2, 5, 10, 50, 100];
     let result = (|| {
         for &raw in probes {
-            xy.write_raw_holding(REG_T_IN_OFFSET, raw)
-                .map_err(driver_error)?;
-            let mut got = [0u16; 1];
-            xy.read_raw_holding(REG_T_IN_OFFSET, &mut got)
-                .map_err(driver_error)?;
-            expect_eq(
-                &format!("T-IN-OFFSET ignored raw {raw}"),
-                original[0],
-                got[0],
-            )?;
-            info!("    T-IN-OFFSET write raw {raw:>3} -> read raw {}", got[0]);
+            xy.write_word(Reg::TInOffset, raw).map_err(driver_error)?;
+            let got = xy.read_word(Reg::TInOffset).map_err(driver_error)?;
+            expect_eq(&format!("T-IN-OFFSET ignored raw {raw}"), original, got)?;
+            info!("    T-IN-OFFSET write raw {raw:>3} -> read raw {}", got);
         }
         Ok(())
     })();
 
     let cleanup = (|| {
-        xy.write_raw_holding(REG_T_IN_OFFSET, original[0])
+        xy.write_word(Reg::TInOffset, original)
             .map_err(driver_error)?;
-        let mut verify = [0u16; 1];
-        xy.read_raw_holding(REG_T_IN_OFFSET, &mut verify)
-            .map_err(driver_error)?;
-        expect_eq("T-IN-OFFSET restore", original[0], verify[0])
+        let verify = xy.read_word(Reg::TInOffset).map_err(driver_error)?;
+        expect_eq("T-IN-OFFSET restore", original, verify)
     })();
     finish_with_cleanup(result, cleanup, "T-IN-OFFSET cleanup")
 }
 
 /// Verifies the empirically established nine-minute SLEEP ceiling.
 fn test_sleep_raw_probe(xy: &mut T) -> Result<(), String> {
-    const REG_SLEEP: u16 = 0x0015;
-    let mut original = [0u16; 1];
-    xy.read_raw_holding(REG_SLEEP, &mut original)
-        .map_err(driver_error)?;
-    info!("  SLEEP raw original = {}", original[0]);
+    let original = xy.read_word(Reg::Sleep).map_err(driver_error)?;
+    info!("  SLEEP raw original = {}", original);
 
     let probes: &[u16] = &[0, 1, 5, 8, 9, 10, 11, 15, 30, 60, 100, 999];
     let result = (|| {
         for &raw in probes {
-            xy.write_raw_holding(REG_SLEEP, raw).map_err(driver_error)?;
+            xy.write_word(Reg::Sleep, raw).map_err(driver_error)?;
             thread::sleep(Duration::from_millis(50));
-            let mut got = [0u16; 1];
-            xy.read_raw_holding(REG_SLEEP, &mut got)
-                .map_err(driver_error)?;
-            expect_eq(&format!("SLEEP raw {raw}"), raw.min(9), got[0])?;
-            info!("    SLEEP write raw {raw:>3} -> read raw {}", got[0]);
+            let got = xy.read_word(Reg::Sleep).map_err(driver_error)?;
+            expect_eq(&format!("SLEEP raw {raw}"), raw.min(9), got)?;
+            info!("    SLEEP write raw {raw:>3} -> read raw {}", got);
         }
         Ok(())
     })();
 
     let cleanup = (|| {
-        xy.write_raw_holding(REG_SLEEP, original[0])
-            .map_err(driver_error)?;
-        let mut verify = [0u16; 1];
-        xy.read_raw_holding(REG_SLEEP, &mut verify)
-            .map_err(driver_error)?;
-        expect_eq("SLEEP restore", original[0], verify[0])
+        xy.write_word(Reg::Sleep, original).map_err(driver_error)?;
+        let verify = xy.read_word(Reg::Sleep).map_err(driver_error)?;
+        expect_eq("SLEEP restore", original, verify)
     })();
     finish_with_cleanup(result, cleanup, "SLEEP cleanup")
 }
@@ -997,8 +955,8 @@ fn test_group_full_round_trip_all(xy: &mut T) -> Result<(), String> {
     xy.set_temp_unit(TempUnit::Celsius).map_err(driver_error)?;
     // Write a unique probe to every M0..=M9, read back, verify, restore.
     for n in 0u8..=9 {
-        let mut original = [0; GROUP_REGISTER_COUNT];
-        xy.read_raw_holding(group_address(n as usize), &mut original)
+        let mut original = [0; regs::GROUP_LEN];
+        xy.read_raw_holding(regs::group_addr(n), &mut original)
             .map_err(driver_error)?;
         let probe = GroupParams {
             setpoints: Setpoints {
@@ -1083,13 +1041,13 @@ fn test_recall_each_group(xy: &mut T) -> Result<(), String> {
     xy.set_output(false).map_err(driver_error)?;
     for n in 0u8..=9 {
         xy.set_voltage(0.0).map_err(driver_error)?;
-        let mut expected = [0; GROUP_REGISTER_COUNT];
-        xy.read_raw_holding(group_address(n as usize), &mut expected)
+        let mut expected = [0; regs::GROUP_LEN];
+        xy.read_raw_holding(regs::group_addr(n), &mut expected)
             .map_err(driver_error)?;
         let result = (|| {
             xy.recall_group(n).map_err(driver_error)?;
-            let mut actual = [0; GROUP_REGISTER_COUNT];
-            xy.read_raw_holding(GROUP_BASE, &mut actual)
+            let mut actual = [0; regs::GROUP_LEN];
+            xy.read_raw_holding(regs::GROUP_BASE, &mut actual)
                 .map_err(driver_error)?;
             expect_eq(&format!("recall M{n} into M0"), expected, actual)
         })();

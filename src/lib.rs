@@ -35,6 +35,10 @@
 //! features and implement [`transport::ModbusTransport`] yourself; the [`framing`]
 //! module exposes the on-wire codec.
 //!
+//! The [`regs`] module publishes the register map the raw accessors
+//! ([`Xy::read_raw_holding`], [`Xy::write_raw_holding`]) take, so callers
+//! reaching past the typed API need not hard-code addresses.
+//!
 //! For `esp-idf-hal` users, the `esp-idf-hal` feature ships a convenience
 //! constructor so you don't need to write a UART wrapper:
 //!
@@ -51,7 +55,7 @@ mod device;
 mod types;
 
 pub mod framing;
-pub(crate) mod regs;
+pub mod regs;
 pub mod transport;
 
 #[cfg(feature = "embedded-io")]

@@ -92,11 +92,11 @@ fn set_voltage_scales_correctly() {
     // 14.40 V → 1440 raw, against a live 72.00 V S-OVP.
     let mock = MockTransport::new(vec![
         Op::Read {
-            addr: REG_S_OVP,
+            addr: Reg::SOvp.addr(),
             values: vec![7200],
         },
         Op::WriteOne {
-            addr: REG_V_SET,
+            addr: Reg::VSet.addr(),
             value: 1440,
         },
     ]);
@@ -106,11 +106,11 @@ fn set_voltage_scales_correctly() {
     // Equal is allowed: 14.40 V against a 14.40 V threshold.
     let mut xy = Xy::new(MockTransport::new(vec![
         Op::Read {
-            addr: REG_S_OVP,
+            addr: Reg::SOvp.addr(),
             values: vec![1440],
         },
         Op::WriteOne {
-            addr: REG_V_SET,
+            addr: Reg::VSet.addr(),
             value: 1440,
         },
     ]));
@@ -119,7 +119,7 @@ fn set_voltage_scales_correctly() {
     // One raw count above the live threshold is rejected. The mock panics on
     // drop with an unconsumed script, so this also proves no write was sent.
     let mut xy = Xy::new(MockTransport::new(vec![Op::Read {
-        addr: REG_S_OVP,
+        addr: Reg::SOvp.addr(),
         values: vec![1439],
     }]));
     assert_eq!(
@@ -140,11 +140,11 @@ fn set_protection_uses_bulk_write() {
     // 14.40 V setpoint.
     let mock = MockTransport::new(vec![
         Op::Read {
-            addr: REG_V_SET,
+            addr: Reg::VSet.addr(),
             values: vec![1440],
         },
         Op::WriteMany {
-            addr: REG_S_LVP,
+            addr: Reg::SLvp.addr(),
             values: vec![1000, 1500, 1250],
         },
     ]);
@@ -154,11 +154,11 @@ fn set_protection_uses_bulk_write() {
     // Equal is allowed: a 15.00 V threshold against a 15.00 V setpoint.
     let mut xy = Xy::new(MockTransport::new(vec![
         Op::Read {
-            addr: REG_V_SET,
+            addr: Reg::VSet.addr(),
             values: vec![1500],
         },
         Op::WriteMany {
-            addr: REG_S_LVP,
+            addr: Reg::SLvp.addr(),
             values: vec![1000, 1500, 1250],
         },
     ]));
@@ -166,7 +166,7 @@ fn set_protection_uses_bulk_write() {
 
     // One raw count below the live setpoint is rejected before the bulk write.
     let mut xy = Xy::new(MockTransport::new(vec![Op::Read {
-        addr: REG_V_SET,
+        addr: Reg::VSet.addr(),
         values: vec![1501],
     }]));
     assert_eq!(
@@ -178,7 +178,7 @@ fn set_protection_uses_bulk_write() {
 #[test]
 fn read_protection_decodes_three_regs() {
     let mock = MockTransport::new(vec![Op::Read {
-        addr: REG_S_LVP,
+        addr: Reg::SLvp.addr(),
         values: vec![1000, 1500, 1250],
     }]);
     let mut xy = Xy::new(mock);
@@ -192,15 +192,15 @@ fn read_protection_decodes_three_regs() {
 fn protection_status_decodes_known_and_rejects_unknown_codes() {
     let mock = MockTransport::new(vec![
         Op::Read {
-            addr: REG_PROTECT,
+            addr: Reg::Protect.addr(),
             values: vec![0],
         },
         Op::Read {
-            addr: REG_PROTECT,
+            addr: Reg::Protect.addr(),
             values: vec![4],
         },
         Op::Read {
-            addr: REG_PROTECT,
+            addr: Reg::Protect.addr(),
             values: vec![99],
         },
     ]);
@@ -213,7 +213,7 @@ fn protection_status_decodes_known_and_rejects_unknown_codes() {
     assert_eq!(
         xy.read_protection_status(),
         Err(XyError::InvalidRegisterValue {
-            register: REG_PROTECT,
+            register: Reg::Protect.addr(),
             value: 99,
         })
     );
@@ -236,7 +236,7 @@ fn read_status_decodes_19_regs_in_one_transaction() {
     values[0x12] = 1; // OUTPUT_EN = on
 
     let mock = MockTransport::new(vec![Op::Read {
-        addr: REG_V_SET,
+        addr: Reg::VSet.addr(),
         values: values.to_vec(),
     }]);
     let mut xy = Xy::new(mock);
@@ -264,7 +264,7 @@ fn read_totals_composes_high_low() {
     // wh: high=0, low=12345 → 12.345 Wh.
     // on_time h=1, m=23, s=45.
     let mock = MockTransport::new(vec![Op::Read {
-        addr: REG_AH_LOW,
+        addr: Reg::AhLow.addr(),
         values: vec![500, 2, 12345, 0, 1, 23, 45],
     }]);
     let mut xy = Xy::new(mock);
@@ -286,11 +286,11 @@ fn read_totals_composes_high_low() {
 fn read_group_decodes_14_regs() {
     let mock = MockTransport::new(vec![
         Op::Read {
-            addr: REG_TEMP_UNIT,
+            addr: Reg::TempUnit.addr(),
             values: vec![1],
         },
         Op::Read {
-            addr: group_addr(1),
+            addr: regs::group_addr(1),
             values: vec![
                 1440, // v_set
                 1000, // i_set
@@ -352,15 +352,15 @@ fn write_group_round_trips_through_encode() {
     let stored = vec![1440, 1000, 1000, 1500, 1250, 1800, 0, 0, 0, 0, 0, 0, 94, 1];
     let mock = MockTransport::new(vec![
         Op::Read {
-            addr: REG_TEMP_UNIT,
+            addr: Reg::TempUnit.addr(),
             values: vec![0],
         },
         Op::WriteMany {
-            addr: group_addr(2),
+            addr: regs::group_addr(2),
             values: vec![1440, 1000, 1000, 1500, 1250, 1800, 0, 0, 0, 0, 0, 0, 95, 1],
         },
         Op::Read {
-            addr: group_addr(2),
+            addr: regs::group_addr(2),
             values: stored,
         },
     ]);
@@ -390,7 +390,7 @@ fn write_group_round_trips_through_encode() {
     let mut invalid = p;
     invalid.s_otp.value = 110.1;
     let mut invalid_xy = Xy::new(MockTransport::new(vec![Op::Read {
-        addr: REG_TEMP_UNIT,
+        addr: Reg::TempUnit.addr(),
         values: vec![0],
     }]));
     assert_eq!(
@@ -502,7 +502,7 @@ fn live_group_rejects_protection_crossing_in_either_direction() {
         ];
         let mut script = vec![
             Op::Read {
-                addr: REG_TEMP_UNIT,
+                addr: Reg::TempUnit.addr(),
                 values: vec![0],
             },
             Op::Read {
@@ -512,11 +512,11 @@ fn live_group_rejects_protection_crossing_in_either_direction() {
         ];
         if case.accepted {
             script.push(Op::WriteMany {
-                addr: group_addr(0),
+                addr: regs::group_addr(0),
                 values: values.clone(),
             });
             script.push(Op::Read {
-                addr: group_addr(0),
+                addr: regs::group_addr(0),
                 values,
             });
         }
@@ -589,7 +589,7 @@ fn group_encode_decode_round_trip() {
         .unwrap();
     // Pin the encoded oah/owh register pair layout (low, high).
     assert_eq!(regs[8..12], [500, 2, 12_345, 0]);
-    let decoded = decode_group(&regs, group_addr(0), TempUnit::Celsius).unwrap();
+    let decoded = decode_group(&regs, regs::group_addr(0), TempUnit::Celsius).unwrap();
     assert_eq!(decoded.setpoints, p.setpoints);
     assert_eq!(decoded.safety_limits, p.safety_limits);
     assert_eq!(decoded.s_opp_w, p.s_opp_w);
@@ -678,21 +678,25 @@ fn one_shot_setters_use_correct_addr_and_value() {
             $action(&mut xy).unwrap();
         }};
     }
-    check!(REG_V_SET, 1440, |x: &mut Xy<_>| x.set_voltage(14.40), guard REG_S_OVP => 7200);
-    check!(REG_I_SET, 500, |x: &mut Xy<_>| x.set_current_limit(5.00));
-    check!(REG_OUTPUT_EN, 1, |x: &mut Xy<_>| x.set_output(true));
-    check!(REG_OUTPUT_EN, 0, |x: &mut Xy<_>| x.set_output(false));
-    check!(REG_PROTECT, 0, |x: &mut Xy<_>| x.clear_protection_status());
-    check!(REG_LOCK, 1, |x: &mut Xy<_>| x.set_lock(true));
-    check!(REG_BACKLIGHT, 3, |x: &mut Xy<_>| x.set_backlight(3));
-    check!(REG_SLEEP, 9, |x: &mut Xy<_>| x.set_sleep_minutes(9));
-    check!(REG_BUZZER, 1, |x: &mut Xy<_>| x.set_buzzer(true));
-    check!(REG_SLAVE_ADDR, 7, |x: &mut Xy<_>| x.set_slave_address(7));
-    check!(REG_S_INI, 1, |x: &mut Xy<_>| x.set_power_on_output(true));
-    check!(REG_EXTRACT_M, 3, |x: &mut Xy<_>| x.recall_group(3));
-    check!(REG_BAUD_CODE, 6, |x: &mut Xy<_>| x
+    check!(Reg::VSet.addr(), 1440, |x: &mut Xy<_>| x.set_voltage(14.40), guard Reg::SOvp.addr() => 7200);
+    check!(Reg::ISet.addr(), 500, |x: &mut Xy<_>| x
+        .set_current_limit(5.00));
+    check!(Reg::OutputEn.addr(), 1, |x: &mut Xy<_>| x.set_output(true));
+    check!(Reg::OutputEn.addr(), 0, |x: &mut Xy<_>| x.set_output(false));
+    check!(Reg::Protect.addr(), 0, |x: &mut Xy<_>| x
+        .clear_protection_status());
+    check!(Reg::Lock.addr(), 1, |x: &mut Xy<_>| x.set_lock(true));
+    check!(Reg::Backlight.addr(), 3, |x: &mut Xy<_>| x.set_backlight(3));
+    check!(Reg::Sleep.addr(), 9, |x: &mut Xy<_>| x.set_sleep_minutes(9));
+    check!(Reg::Buzzer.addr(), 1, |x: &mut Xy<_>| x.set_buzzer(true));
+    check!(Reg::SlaveAddr.addr(), 7, |x: &mut Xy<_>| x
+        .set_slave_address(7));
+    check!(Reg::SIni.addr(), 1, |x: &mut Xy<_>| x
+        .set_power_on_output(true));
+    check!(Reg::ExtractM.addr(), 3, |x: &mut Xy<_>| x.recall_group(3));
+    check!(Reg::BaudCode.addr(), 6, |x: &mut Xy<_>| x
         .set_baud_rate(BaudRate::B115200));
-    check!(REG_TEMP_UNIT, 1, |x: &mut Xy<_>| x
+    check!(Reg::TempUnit.addr(), 1, |x: &mut Xy<_>| x
         .set_temp_unit(TempUnit::Fahrenheit));
 }
 
@@ -710,57 +714,112 @@ fn one_shot_getters_use_correct_addr_and_scale() {
             assert_eq!($action(&mut xy).unwrap(), $expected);
         }};
     }
-    check!(REG_V_OUT, 1234, |x: &mut Xy<_>| x.read_voltage_out(), 12.34);
-    check!(REG_I_OUT, 500, |x: &mut Xy<_>| x.read_current_out(), 5.00);
-    check!(REG_P_OUT, 675, |x: &mut Xy<_>| x.read_power_out(), 67.5);
-    check!(REG_V_IN, 2400, |x: &mut Xy<_>| x.read_voltage_in(), 24.00);
-    check!(REG_OUTPUT_EN, 1, |x: &mut Xy<_>| x.read_output(), true);
-    check!(REG_LOCK, 1, |x: &mut Xy<_>| x.read_lock(), true);
-    check!(REG_BACKLIGHT, 4, |x: &mut Xy<_>| x.read_backlight(), 4u8);
-    check!(REG_SLEEP, 9, |x: &mut Xy<_>| x.read_sleep_minutes(), 9u16);
-    check!(REG_BUZZER, 0, |x: &mut Xy<_>| x.read_buzzer(), false);
     check!(
-        REG_SLAVE_ADDR,
+        Reg::VOut.addr(),
+        1234,
+        |x: &mut Xy<_>| x.read_voltage_out(),
+        12.34
+    );
+    check!(
+        Reg::IOut.addr(),
+        500,
+        |x: &mut Xy<_>| x.read_current_out(),
+        5.00
+    );
+    check!(
+        Reg::POut.addr(),
+        675,
+        |x: &mut Xy<_>| x.read_power_out(),
+        67.5
+    );
+    check!(
+        Reg::VIn.addr(),
+        2400,
+        |x: &mut Xy<_>| x.read_voltage_in(),
+        24.00
+    );
+    check!(
+        Reg::OutputEn.addr(),
+        1,
+        |x: &mut Xy<_>| x.read_output(),
+        true
+    );
+    check!(Reg::Lock.addr(), 1, |x: &mut Xy<_>| x.read_lock(), true);
+    check!(
+        Reg::Backlight.addr(),
+        4,
+        |x: &mut Xy<_>| x.read_backlight(),
+        4u8
+    );
+    check!(
+        Reg::Sleep.addr(),
+        9,
+        |x: &mut Xy<_>| x.read_sleep_minutes(),
+        9u16
+    );
+    check!(
+        Reg::Buzzer.addr(),
+        0,
+        |x: &mut Xy<_>| x.read_buzzer(),
+        false
+    );
+    check!(
+        Reg::SlaveAddr.addr(),
         7,
         |x: &mut Xy<_>| x.read_slave_address(),
         7u8
     );
-    check!(REG_S_INI, 1, |x: &mut Xy<_>| x.read_power_on_output(), true);
-    check!(REG_MODEL, 0x6500, |x: &mut Xy<_>| x.read_model(), 0x6500u16);
-    check!(REG_VERSION, 0x71, |x: &mut Xy<_>| x.read_version(), 0x71u16);
     check!(
-        REG_T_IN_OFFSET,
+        Reg::SIni.addr(),
+        1,
+        |x: &mut Xy<_>| x.read_power_on_output(),
+        true
+    );
+    check!(
+        Reg::Model.addr(),
+        0x6500,
+        |x: &mut Xy<_>| x.read_model(),
+        0x6500u16
+    );
+    check!(
+        Reg::Version.addr(),
+        0x71,
+        |x: &mut Xy<_>| x.read_version(),
+        0x71u16
+    );
+    check!(
+        Reg::TInOffset.addr(),
         15,
         |x: &mut Xy<_>| x.read_temp_offset_internal(),
         1.5
     );
     // 0xFFE7 = -25 as i16 → -2.5 °C; signed decoding must not read 6551.1.
     check!(
-        REG_T_IN_OFFSET,
+        Reg::TInOffset.addr(),
         0xFFE7,
         |x: &mut Xy<_>| x.read_temp_offset_internal(),
         -2.5
     );
     check!(
-        REG_T_EX_OFFSET,
+        Reg::TExOffset.addr(),
         20,
         |x: &mut Xy<_>| x.read_temp_offset_external(),
         2.0
     );
     check!(
-        REG_CVCC,
+        Reg::Cvcc.addr(),
         0,
         |x: &mut Xy<_>| x.read_reg_mode(),
         RegMode::ConstantVoltage
     );
     check!(
-        REG_CVCC,
+        Reg::Cvcc.addr(),
         1,
         |x: &mut Xy<_>| x.read_reg_mode(),
         RegMode::ConstantCurrent
     );
     check!(
-        REG_BAUD_CODE,
+        Reg::BaudCode.addr(),
         6,
         |x: &mut Xy<_>| x.read_baud_rate(),
         BaudRate::B115200
@@ -768,14 +827,14 @@ fn one_shot_getters_use_correct_addr_and_scale() {
 
     // 2-reg bulk reads.
     let mut xy = Xy::new(MockTransport::new(vec![Op::Read {
-        addr: REG_V_SET,
+        addr: Reg::VSet.addr(),
         values: vec![1440, 1000],
     }]));
     let s = xy.read_setpoints().unwrap();
     assert_eq!((s.v_set, s.i_set), (14.40, 10.00));
 
     let mut xy = Xy::new(MockTransport::new(vec![Op::Read {
-        addr: REG_T_IN,
+        addr: Reg::TIn.addr(),
         values: vec![345, 256, 0, 0, 0, 0, 1],
     }]));
     let t = xy.read_temperature_internal().unwrap();
@@ -790,7 +849,7 @@ fn one_shot_getters_use_correct_addr_and_scale() {
     // T-IN is two's-complement signed. 0xFFCE = -50 as i16 -> -5.0 degC;
     // unsigned decoding would read 65486 / 10 = 6548.6.
     let mut xy = Xy::new(MockTransport::new(vec![Op::Read {
-        addr: REG_T_IN,
+        addr: Reg::TIn.addr(),
         values: vec![0xFFCE, 0, 0, 0, 0, 0, 0],
     }]));
     assert_eq!(
@@ -805,11 +864,11 @@ fn one_shot_getters_use_correct_addr_and_scale() {
     // 0x7FFF = 32767 -> 3276.7.
     let mut xy = Xy::new(MockTransport::new(vec![
         Op::Read {
-            addr: REG_T_IN,
+            addr: Reg::TIn.addr(),
             values: vec![0x8000, 0, 0, 0, 0, 0, 0],
         },
         Op::Read {
-            addr: REG_T_IN,
+            addr: Reg::TIn.addr(),
             values: vec![0x7FFF, 0, 0, 0, 0, 0, 0],
         },
     ]));
@@ -819,114 +878,122 @@ fn one_shot_getters_use_correct_addr_and_scale() {
 
 #[test]
 fn invalid_register_values_are_not_normalized() {
-    let mut invalid_group_bool = vec![0; GROUP_LEN as usize];
+    let mut invalid_group_bool = vec![0; GROUP_LEN];
     invalid_group_bool[13] = 2;
-    let mut invalid_group_hours = vec![0; GROUP_LEN as usize];
+    let mut invalid_group_hours = vec![0; GROUP_LEN];
     invalid_group_hours[6] = 100;
-    let mut invalid_group_minutes = vec![0; GROUP_LEN as usize];
+    let mut invalid_group_minutes = vec![0; GROUP_LEN];
     invalid_group_minutes[7] = 60;
     let mut invalid_output_status = status_fixture([0; 6]);
-    invalid_output_status[REG_OUTPUT_EN as usize] = 2;
+    invalid_output_status[Reg::OutputEn.addr() as usize] = 2;
     let mut invalid_protection_status = status_fixture([0; 6]);
-    invalid_protection_status[REG_PROTECT as usize] = 11;
+    invalid_protection_status[Reg::Protect.addr() as usize] = 11;
     let mut invalid_reg_mode_status = status_fixture([0; 6]);
-    invalid_reg_mode_status[REG_CVCC as usize] = 2;
+    invalid_reg_mode_status[Reg::Cvcc.addr() as usize] = 2;
     let mut xy = Xy::new(MockTransport::new(vec![
         Op::Read {
-            addr: REG_OUTPUT_EN,
+            addr: Reg::OutputEn.addr(),
             values: vec![2],
         },
         Op::Read {
-            addr: REG_BACKLIGHT,
+            addr: Reg::Backlight.addr(),
             values: vec![6],
         },
         Op::Read {
-            addr: REG_SLEEP,
+            addr: Reg::Sleep.addr(),
             values: vec![10],
         },
         Op::Read {
-            addr: REG_PROTECT,
+            addr: Reg::Protect.addr(),
             values: vec![11],
         },
         Op::Read {
-            addr: REG_CVCC,
+            addr: Reg::Cvcc.addr(),
             values: vec![2],
         },
         Op::Read {
-            addr: REG_TEMP_UNIT,
+            addr: Reg::TempUnit.addr(),
             values: vec![2],
         },
         Op::Read {
-            addr: REG_BAUD_CODE,
+            addr: Reg::BaudCode.addr(),
             values: vec![9],
         },
         Op::Read {
-            addr: REG_TEMP_UNIT,
+            addr: Reg::TempUnit.addr(),
             values: vec![0],
         },
         Op::Read {
-            addr: group_addr(1),
+            addr: regs::group_addr(1),
             values: invalid_group_bool,
         },
         Op::Read {
-            addr: REG_TEMP_UNIT,
+            addr: Reg::TempUnit.addr(),
             values: vec![0],
         },
         Op::Read {
-            addr: group_addr(2),
+            addr: regs::group_addr(2),
             values: invalid_group_hours,
         },
         Op::Read {
-            addr: REG_TEMP_UNIT,
+            addr: Reg::TempUnit.addr(),
             values: vec![0],
         },
         Op::Read {
-            addr: group_addr(3),
+            addr: regs::group_addr(3),
             values: invalid_group_minutes,
         },
         Op::Read {
-            addr: REG_AH_LOW,
+            addr: Reg::AhLow.addr(),
             values: vec![0, 0, 0, 0, 1, 60, 0],
         },
         Op::Read {
-            addr: REG_AH_LOW,
+            addr: Reg::AhLow.addr(),
             values: vec![0, 0, 0, 0, 1, 0, 60],
         },
         Op::Read {
-            addr: REG_T_IN,
+            addr: Reg::TIn.addr(),
             values: vec![0, 8888, 0, 0, 0, 0, 2],
         },
         Op::Read {
-            addr: REG_V_SET,
+            addr: Reg::VSet.addr(),
             values: invalid_output_status,
         },
         Op::Read {
-            addr: REG_V_SET,
+            addr: Reg::VSet.addr(),
             values: invalid_protection_status,
         },
         Op::Read {
-            addr: REG_V_SET,
+            addr: Reg::VSet.addr(),
             values: invalid_reg_mode_status,
         },
     ]));
 
     for (result, register, value) in [
-        (xy.read_output().map(|_| ()), REG_OUTPUT_EN, 2),
-        (xy.read_backlight().map(|_| ()), REG_BACKLIGHT, 6),
-        (xy.read_sleep_minutes().map(|_| ()), REG_SLEEP, 10),
-        (xy.read_protection_status().map(|_| ()), REG_PROTECT, 11),
-        (xy.read_reg_mode().map(|_| ()), REG_CVCC, 2),
-        (xy.read_temp_unit().map(|_| ()), REG_TEMP_UNIT, 2),
-        (xy.read_baud_rate().map(|_| ()), REG_BAUD_CODE, 9),
-        (xy.read_group(1).map(|_| ()), group_addr(1) + 13, 2),
-        (xy.read_group(2).map(|_| ()), group_addr(2) + 6, 100),
-        (xy.read_group(3).map(|_| ()), group_addr(3) + 7, 60),
-        (xy.read_totals().map(|_| ()), REG_OUT_M, 60),
-        (xy.read_totals().map(|_| ()), REG_OUT_S, 60),
-        (xy.read_temperature_internal().map(|_| ()), REG_TEMP_UNIT, 2),
-        (xy.read_status().map(|_| ()), REG_OUTPUT_EN, 2),
-        (xy.read_status().map(|_| ()), REG_PROTECT, 11),
-        (xy.read_status().map(|_| ()), REG_CVCC, 2),
+        (xy.read_output().map(|_| ()), Reg::OutputEn.addr(), 2),
+        (xy.read_backlight().map(|_| ()), Reg::Backlight.addr(), 6),
+        (xy.read_sleep_minutes().map(|_| ()), Reg::Sleep.addr(), 10),
+        (
+            xy.read_protection_status().map(|_| ()),
+            Reg::Protect.addr(),
+            11,
+        ),
+        (xy.read_reg_mode().map(|_| ()), Reg::Cvcc.addr(), 2),
+        (xy.read_temp_unit().map(|_| ()), Reg::TempUnit.addr(), 2),
+        (xy.read_baud_rate().map(|_| ()), Reg::BaudCode.addr(), 9),
+        (xy.read_group(1).map(|_| ()), regs::group_addr(1) + 13, 2),
+        (xy.read_group(2).map(|_| ()), regs::group_addr(2) + 6, 100),
+        (xy.read_group(3).map(|_| ()), regs::group_addr(3) + 7, 60),
+        (xy.read_totals().map(|_| ()), Reg::OutM.addr(), 60),
+        (xy.read_totals().map(|_| ()), Reg::OutS.addr(), 60),
+        (
+            xy.read_temperature_internal().map(|_| ()),
+            Reg::TempUnit.addr(),
+            2,
+        ),
+        (xy.read_status().map(|_| ()), Reg::OutputEn.addr(), 2),
+        (xy.read_status().map(|_| ()), Reg::Protect.addr(), 11),
+        (xy.read_status().map(|_| ()), Reg::Cvcc.addr(), 2),
     ] {
         assert_eq!(
             result,
@@ -940,19 +1007,19 @@ fn temp_unit_round_trip() {
     // Write Celsius, read back Celsius (0); same for Fahrenheit (1).
     let mock = MockTransport::new(vec![
         Op::WriteOne {
-            addr: REG_TEMP_UNIT,
+            addr: Reg::TempUnit.addr(),
             value: 0,
         },
         Op::Read {
-            addr: REG_TEMP_UNIT,
+            addr: Reg::TempUnit.addr(),
             values: vec![0],
         },
         Op::WriteOne {
-            addr: REG_TEMP_UNIT,
+            addr: Reg::TempUnit.addr(),
             value: 1,
         },
         Op::Read {
-            addr: REG_TEMP_UNIT,
+            addr: Reg::TempUnit.addr(),
             values: vec![1],
         },
     ]);
@@ -1020,75 +1087,73 @@ fn invalid_inputs_fail_before_transport_io() {
 
 #[test]
 fn register_conversions_preserve_precision_and_physical_ranges() {
-    for scale in [100.0, 1000.0] {
-        for raw in [0, 1, 16_777_217, 420_000_001, u32::MAX] {
-            let value = from_reg_u32(raw as u16, (raw >> 16) as u16, scale);
-            let words = to_reg_u32(
-                value,
-                scale,
-                ValueRange {
-                    min: 0.0,
-                    max: u32::MAX as f64 / scale,
-                },
-                InputField::EnergyLimit,
-            )
-            .unwrap();
+    // Signedness and scale come from the register, not the call site: the same
+    // raw word decodes differently depending on which register it came from.
+    assert_eq!(decode_scaled(Reg::TIn, 0xFFCE), -5.0);
+    assert_eq!(decode_scaled(Reg::VOut, 0xFFCE), 654.86);
+    assert_ne!(
+        decode_scaled(Reg::TIn, 0xFFCE),
+        decode_scaled(Reg::VOut, 0xFFCE)
+    );
+    // Same word, same 10.0 scale, but P-OUT is unsigned and T-IN is not.
+    assert_eq!(decode_scaled(Reg::POut, 0xFFCE), 6548.6);
+    assert_eq!(decode_scaled(Reg::TIn, 0xFFCE), -5.0);
+
+    // The two 32-bit pairs at the scales and ceilings the table declares:
+    // charge 9999 Ah at 1000, energy 4_200_000 Wh at 100.
+    for (low, scale, raws) in [
+        (
+            Reg::SOahLow,
+            1000.0f64,
+            [0u32, 1, 1_234_567, 9_999_000].as_slice(),
+        ),
+        (
+            Reg::SOwhLow,
+            100.0f64,
+            [0u32, 1, 16_777_217, 420_000_000].as_slice(),
+        ),
+    ] {
+        for &raw in raws {
+            let value = decode_wide(low, raw as u16, (raw >> 16) as u16);
+            assert_eq!(value, raw as f64 / scale, "{low:?} raw={raw}");
+            let words = to_reg_wide(low, value).unwrap();
             let round_trip = ((words.high as u32) << 16) | words.low as u32;
-            assert_eq!(round_trip, raw, "scale={scale}, raw={raw}");
+            assert_eq!(round_trip, raw, "{low:?} raw={raw}");
         }
     }
 
-    let upper_non_grid = ValueRange {
-        min: 0.0,
-        max: 0.0078125,
-    };
-    // 0.0078125 * 100 rounds to raw 1, which represents 0.01 > max.
-    assert_eq!(
-        to_reg_u16(
-            0.0078125,
-            100.0,
-            upper_non_grid,
-            InputField::VoltageSetpoint,
-        ),
-        Err(InputError::OutOfRange {
-            field: InputField::VoltageSetpoint
-        })
-    );
-    assert!(matches!(
-        to_reg_u32(0.0078125, 100.0, upper_non_grid, InputField::EnergyLimit,),
-        Err(InputError::OutOfRange {
-            field: InputField::EnergyLimit
-        })
-    ));
+    // Every shipped limit sits on the raw grid, so its ceiling encodes exactly.
+    assert_eq!(to_reg(Reg::VSet, 70.0), Ok(7000));
+    assert_eq!(to_reg(Reg::SLvp, 10.0), Ok(1000));
+    assert_eq!(to_reg(Reg::SOpp, 2000.0), Ok(2000));
+    assert_eq!(to_reg(Reg::SOcp, 27.0), Ok(2700));
 
-    let lower_non_grid = ValueRange {
-        min: 0.004,
-        max: 1.0,
-    };
-    // 0.004 * 100 rounds to raw 0, which represents 0.0 < min.
+    // A bound that is *not* grid-aligned must still be honoured after
+    // rounding. 0.0078125 * 100 rounds to raw 1, which represents 0.01.
     assert_eq!(
-        to_reg_u16(0.004, 100.0, lower_non_grid, InputField::VoltageSetpoint,),
+        to_reg_within(Reg::VSet, 0.0078125, 0.0, 0.0078125),
         Err(InputError::OutOfRange {
             field: InputField::VoltageSetpoint
         })
     );
-    assert!(matches!(
-        to_reg_u32(0.004, 100.0, lower_non_grid, InputField::EnergyLimit,),
+    // 0.004 * 100 rounds to raw 0, which represents 0.0 — below the floor.
+    assert_eq!(
+        to_reg_within(Reg::VSet, 0.004, 0.004, 1.0),
         Err(InputError::OutOfRange {
-            field: InputField::EnergyLimit
+            field: InputField::VoltageSetpoint
         })
-    ));
+    );
 }
 
 #[test]
 fn verify_scale_family_compatible_for_xy7025() {
     let mut xy = Xy::new(MockTransport::new(vec![
         Op::Read {
-            addr: REG_MODEL,
+            addr: Reg::Model.addr(),
             values: vec![0x6500],
         },
         Op::Read {
-            addr: REG_MODEL,
+            addr: Reg::Model.addr(),
             values: vec![0x6100],
         },
     ]));
@@ -1109,7 +1174,7 @@ fn verify_scale_family_compatible_for_xy7025() {
 #[test]
 fn verify_scale_family_is_inconclusive_for_unknown_code() {
     let mut xy = Xy::new(MockTransport::new(vec![Op::Read {
-        addr: REG_MODEL,
+        addr: Reg::Model.addr(),
         values: vec![0x7700],
     }]));
     assert_eq!(

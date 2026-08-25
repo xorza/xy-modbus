@@ -33,8 +33,8 @@ encoded in the driver / datasheet — keep them in mind when extending:
 - **S-OTP scale is 1, not 10.** Raw register value equals the displayed
   degrees in the unit selected by `F-C` (raw 95 with unit=°F is 95 °F).
   The third-party tinkering4fun PDF's "scale 10" entry is wrong for this
-  firmware. `decode_group` / `encode_group` use scale=1; tests assert raw
-  95 → 95.0.
+  firmware. `regs::OTP_SCALE` is 1, carried by `Reg::SOtp`'s encoding; tests
+  assert raw 95 → 95.0.
 - **Group writes (M0–M9) clamp S-OTP to 110 °C / 230 °F** in the current
   display unit and apply firmware unit conversion that introduces ±1°
   rounding. Single-register writes via `ModbusTransport::write_single_holding`
@@ -45,8 +45,10 @@ encoded in the driver / datasheet — keep them in mind when extending:
   `device/mod.rs` with a "setters intentionally absent" comment so the
   decision is discoverable.
 - **Backlight floor is 1, not 0.** Writing 0 reads back as 1 — the
-  display can't be fully extinguished via Modbus.
+  display can't be fully extinguished via Modbus. `Reg::Backlight` declares
+  `1..=5`, so the driver rejects 0 rather than letting firmware silently clamp.
 - **SLEEP cap is 9 minutes.** Any write ≥10 reads back as 9. 0 disables.
+  `Reg::Sleep` declares `0..=9`.
 - **External-probe temperature (`T_EX`) is raw-only.** Bring-up had no
   thermistor connected, so the connected-probe scale remains unverified. The
   high-level API exposes only the verified internal sensor; use raw register
