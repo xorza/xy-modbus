@@ -27,7 +27,7 @@ use esp_idf_hal::units::Hertz;
 use xy_modbus::regs;
 use xy_modbus::regs::{Group, Reg};
 use xy_modbus::{
-    GroupParams, ProtectionStatus, SafetyLimits, ScaleCheck, Setpoints, TempUnit, Temperature, Xy,
+    GroupParams, ModelCheck, ProtectionStatus, SafetyLimits, Setpoints, TempUnit, Temperature, Xy,
 };
 
 const BAUD: u32 = 115200;
@@ -335,7 +335,7 @@ fn prepare_safe_baseline(xy: &mut T) -> Result<(), String> {
         xy.read_power_on_output().map_err(driver_error)?,
     )?;
     xy.clear_protection_status().map_err(driver_error)?;
-    xy.set_protection(HEADROOM_SAFETY).map_err(driver_error)
+    xy.set_safety_limits(HEADROOM_SAFETY).map_err(driver_error)
 }
 
 fn restore_group(xy: &mut T, n: usize, words: &[u16; Group::LEN], errors: &mut Vec<String>) {
@@ -502,12 +502,14 @@ fn finish_with_cleanup(
 fn test_identity(xy: &mut T) -> Result<(), String> {
     let model_raw = xy.read_model().map_err(driver_error)?;
     let version = xy.read_version().map_err(driver_error)?;
-    let check = xy.verify_scale_family().map_err(driver_error)?;
+    let check = xy.check_model().map_err(driver_error)?;
     info!("  MODEL=0x{model_raw:04X} VERSION=0x{version:04X} check={check:?}");
     match check {
-        ScaleCheck::Compatible { .. } => Ok(()),
-        ScaleCheck::Inconclusive { device_code } => Err(format!(
-            "MODEL inconclusive (device 0x{device_code:04X}); XY7025 expected 0x6500"
+        ModelCheck {
+            limits_match: true, ..
+        } => Ok(()),
+        ModelCheck { device_code, .. } => Err(format!(
+            "MODEL 0x{device_code:04X} is not the XY7025 (0x6500) whose limits this driver enforces"
         )),
     }
 }
@@ -618,19 +620,20 @@ fn test_current_sweep(xy: &mut T) -> Result<(), String> {
 }
 
 fn test_protection_sweep(xy: &mut T) -> Result<(), String> {
-    // Drop V_SET below the smallest OVP sample so set_protection isn't
+    // Drop V_SET below the smallest OVP sample so set_safety_limits isn't
     // silently rejected for OVP < V_SET.
     xy.set_voltage(0.0).map_err(driver_error)?;
     xy.set_current_limit(0.0).map_err(driver_error)?;
     for s in PROT_SAMPLES {
-        xy.set_protection(*s).map_err(driver_error)?;
-        let got = xy.read_protection().map_err(driver_error)?;
+        xy.set_safety_limits(*s).map_err(driver_error)?;
+        let got = xy.read_safety_limits().map_err(driver_error)?;
         expect_precise(&format!("LVP@{:?}", s), s.lvp_v, got.lvp_v)?;
         expect_precise(&format!("OVP@{:?}", s), s.ovp_v, got.ovp_v)?;
         expect_precise(&format!("OCP@{:?}", s), s.ocp_a, got.ocp_a)?;
     }
     // Restore a wide-open headroom for downstream tests.
-    xy.set_protection(HEADROOM_SAFETY).map_err(driver_error)?;
+    xy.set_safety_limits(HEADROOM_SAFETY)
+        .map_err(driver_error)?;
     info!("  swept {} protection sets", PROT_SAMPLES.len());
     Ok(())
 }
@@ -855,9 +858,9 @@ fn test_lifecycle(xy: T<'static>) -> Result<(), String> {
     let mut rebuilt: T<'static> = Xy::with_slave(transport, 1).map_err(driver_error)?;
 
     // Final round-trip on the rebuilt instance.
-    let check = rebuilt.verify_scale_family().map_err(driver_error)?;
-    if !matches!(check, ScaleCheck::Compatible { .. }) {
-        return Err(format!("rebuilt scale-family check: {check:?}"));
+    let check = rebuilt.check_model().map_err(driver_error)?;
+    if !check.limits_match {
+        return Err(format!("rebuilt model check: {check:?}"));
     }
     Ok(())
 }

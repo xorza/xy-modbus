@@ -19,7 +19,7 @@ use xy_modbus::{SafetyLimits, Xy};
 
 let mut xy = Xy::new(my_transport);
 
-xy.set_protection(SafetyLimits { lvp_v: 22.0, ovp_v: 15.0, ocp_a: 15.0 })?;
+xy.set_safety_limits(SafetyLimits { lvp_v: 22.0, ovp_v: 15.0, ocp_a: 15.0 })?;
 xy.set_voltage(13.5)?;
 xy.set_current_limit(10.0)?;
 xy.set_output(true)?;
@@ -27,22 +27,39 @@ xy.set_output(true)?;
 let s = xy.read_status()?;
 ```
 
-The wrong scale family silently shifts current and power readings by 10×, so
-call `xy.verify_scale_family()?` at boot. A `ScaleCheck::Compatible` result
-confirms the wire scales only—not exact hardware identity or mechanical limits.
-Unknown codes return `ScaleCheck::Inconclusive`.
+Call `xy.check_model()?` at boot. The returned `ModelCheck` reports two things
+separately, because on real hardware they differ:
+
+- `scales_match` — the fixed-point scales this driver decodes with. Getting
+  this wrong silently shifts current and power readings by 10×.
+- `limits_match` — the physical ceilings its setters enforce (70 V, 25 A, …).
+
+Only `0x6500` (XY7025) sets both. `0x6100`-class devices share the scales but
+have lower ceilings, so readings decode correctly while the setters would
+accept values the hardware cannot deliver — use the raw layers for those.
+Neither flag proves exact hardware identity.
+
+Register addresses, scales and signedness live in the public `regs` module:
+`Reg` names every modelled register and carries its `Encoding`, and `Group`
+covers the M0–M9 memory groups. `Xy::read_raw_holding` / `write_raw_holding`
+take a bare address, so pass `Reg::TEx.addr()` rather than hard-coding hex.
 
 Only the verified internal temperature sensor is exposed by the high-level API.
-The connected external-probe scale is unverified; register `0x000E` remains
-available through `Xy::read_raw_holding` for explicit bring-up work.
+The connected external-probe scale is unverified; `Reg::TEx` remains available
+through `Xy::read_raw_holding` for explicit bring-up work. It is signed, like
+the other temperature registers — decode it as `i16`.
 
 ## Transport
 
 The default `embedded-io` feature ships `uart::UartTransport` over any
 `uart::BlockingRead + embedded_io::Write` pair. For `esp-idf-hal`, enable
 the `esp-idf-hal` feature and use `Xy::from_esp_uart(uart)`.
-To bring your own, implement `transport::ModbusTransport` directly—the
-`framing` module exposes the on-wire codec and errors.
+To bring your own, implement `transport::ModbusTransport` directly. The
+`framing` module exposes the on-wire codec, including `response_adu_len` for
+transports that must learn a reply's length from its first three bytes, and
+`validate_read_slave` / `validate_write_slave` so the address rules are not
+reimplemented. Every layer reports `RtuError`; `is_request_error()` separates a
+malformed request from a bus fault worth retrying.
 
 The raw framing and UART layers support standard address-`0` FC06/FC10
 broadcast writes without waiting for a response. The high-level `Xy` API stays

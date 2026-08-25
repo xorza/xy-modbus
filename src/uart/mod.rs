@@ -141,8 +141,8 @@ where
     U: BlockingRead + Write,
     D: DelayNs,
 {
-    /// Build a transport with a 500 ms per-read inactivity timeout, a 50 ms
-    /// inter-frame quiet gap, and ten quiet-bus acquisition attempts.
+    /// Build a transport using [`UartTiming::DEFAULT`], which is where those
+    /// numbers and their reasons live.
     pub fn new(uart: U, delay: D) -> Self {
         Self {
             uart,
@@ -194,14 +194,19 @@ enum DrainOutcome {
 /// activity and makes the caller wait another complete quiet interval.
 fn drain_rx<U: BlockingRead>(uart: &mut U) -> Result<DrainOutcome, RtuError> {
     const DRAIN_MAX_BYTES: usize = 4 * MAX_ADU;
+    // Deliberately not `self.buf`: `write_multiple_holdings` builds its request
+    // there *before* acquiring silence, so draining into it would overwrite the
+    // frame about to be sent. The 32 bytes zeroed here cost nothing against the
+    // inter-frame delay this runs behind.
     let mut scratch = [0u8; 32];
+    let mut budget = InterruptBudget::new();
     let mut drained = 0;
     while drained < DRAIN_MAX_BYTES {
         match uart.read(&mut scratch, 0) {
             Ok(0) if drained == 0 => return Ok(DrainOutcome::Quiet),
             Ok(0) => return Ok(DrainOutcome::Activity),
             Ok(n) => drained += n,
-            Err(error) if is_interrupted(&error) => continue,
+            Err(error) if budget.retry(&error) => continue,
             Err(error) => return Err(io_error(IoOperation::Read, error)),
         }
     }
@@ -215,11 +220,41 @@ fn io_error<E: embedded_io::Error>(operation: IoOperation, error: E) -> RtuError
     }
 }
 
-fn is_interrupted<E: embedded_io::Error>(error: &E) -> bool {
-    error.kind() == embedded_io::ErrorKind::Interrupted
+/// A driver that keeps reporting `Interrupted` would otherwise spin forever.
+/// Signals are transient, so a small budget is generous; exhausting it lets the
+/// interrupt surface as the I/O error it is.
+const MAX_INTERRUPT_RETRIES: u32 = 64;
+
+/// Interrupt-retry budget for one read, write, or flush loop.
+#[derive(Debug)]
+struct InterruptBudget {
+    left: u32,
 }
 
+impl InterruptBudget {
+    const fn new() -> Self {
+        Self {
+            left: MAX_INTERRUPT_RETRIES,
+        }
+    }
+
+    /// Whether `error` is a retryable interrupt *and* budget remains. Once it
+    /// returns `false` the caller reports the error, so an endlessly
+    /// interrupting driver fails instead of hanging.
+    fn retry<E: embedded_io::Error>(&mut self, error: &E) -> bool {
+        if error.kind() != embedded_io::ErrorKind::Interrupted || self.left == 0 {
+            return false;
+        }
+        self.left -= 1;
+        true
+    }
+}
+
+/// Free rather than a method because the write path passes `&self.buf[..n]`
+/// while needing `&mut self.uart`; splitting the borrow at the call site is
+/// what lets the transport build a request and send it from one buffer.
 fn write_all<U: Write>(uart: &mut U, mut buf: &[u8]) -> Result<(), RtuError> {
+    let mut budget = InterruptBudget::new();
     while !buf.is_empty() {
         match uart.write(buf) {
             Ok(0) => {
@@ -229,34 +264,43 @@ fn write_all<U: Write>(uart: &mut U, mut buf: &[u8]) -> Result<(), RtuError> {
                 });
             }
             Ok(n) => buf = &buf[n..],
-            Err(error) if is_interrupted(&error) => continue,
+            Err(error) if budget.retry(&error) => continue,
             Err(error) => return Err(io_error(IoOperation::Write, error)),
         }
     }
+    let mut budget = InterruptBudget::new();
     loop {
         match uart.flush() {
             Ok(()) => return Ok(()),
-            Err(error) if is_interrupted(&error) => continue,
+            Err(error) if budget.retry(&error) => continue,
             Err(error) => return Err(io_error(IoOperation::Flush, error)),
         }
     }
 }
 
-/// Fill `buf` from the UART, treating "no bytes within
-/// `read_timeout_ms`" as a timeout. Each `read` call gets a fresh
-/// timeout. This currently acts as an inactivity timeout rather than an
-/// overall transaction deadline.
+/// Fill `buf` from the UART, treating "no bytes within `read_timeout_ms`" as a
+/// timeout. Each `read` call gets a fresh timeout, so this is an *inactivity*
+/// timeout, not an overall deadline: a slave dribbling one byte per interval
+/// holds the transport for up to `buf.len() * read_timeout_ms`, which is about
+/// two minutes for a full-length response at the 500 ms default.
+///
+/// Bounding wall time properly would need a clock, and [`DelayNs`] only delays
+/// — it cannot report elapsed time. Tightening this therefore means taking a
+/// time source on [`UartTransport`], which is a bigger change than it looks:
+/// a slow-but-legitimate transfer and a stalling slave are indistinguishable
+/// byte by byte, so only a deadline can separate them.
 fn read_exact<U: BlockingRead>(
     uart: &mut U,
     buf: &mut [u8],
     read_timeout_ms: u32,
 ) -> Result<(), RtuError> {
+    let mut budget = InterruptBudget::new();
     let mut filled = 0;
     while filled < buf.len() {
         match uart.read(&mut buf[filled..], read_timeout_ms) {
             Ok(0) => return Err(RtuError::Timeout),
             Ok(n) => filled += n,
-            Err(error) if is_interrupted(&error) => continue,
+            Err(error) if budget.retry(&error) => continue,
             Err(error) => return Err(io_error(IoOperation::Read, error)),
         }
     }

@@ -34,9 +34,9 @@ impl BlockingRead for UartDriver<'_> {
 pub type EspIdfTransport<'d> = UartTransport<UartDriver<'d>, FreeRtos>;
 
 impl<'d> Xy<EspIdfTransport<'d>> {
-    /// Wrap an `esp_idf_hal::uart::UartDriver` with the default XY-series
-    /// timing (500 ms response window, 50 ms inter-frame gap). For
-    /// non-default timing, build the transport manually:
+    /// Wrap an `esp_idf_hal::uart::UartDriver` with
+    /// [`crate::uart::UartTiming::DEFAULT`]. For non-default timing, build the
+    /// transport manually:
     ///
     /// ```ignore
     /// use xy_modbus::uart::{UartTiming, UartTransport};

@@ -283,20 +283,31 @@ fn check_v_set_under_ovp(v_set: u16, ovp: u16) -> Result<(), InputError> {
     Ok(())
 }
 
-/// Result of checking whether the device's `MODEL` register belongs to the
-/// scale family supported by [`Xy`].
+/// What the device's `MODEL` register says about compatibility with [`Xy`].
+///
+/// The two flags are separate because they genuinely differ: `0x6100`-class
+/// devices share this driver's fixed-point scales but not its physical
+/// ceilings, so decoding is right while the setters would accept values the
+/// hardware cannot deliver.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum ScaleCheck {
-    Compatible { device_code: u16 },
-    Inconclusive { device_code: u16 },
+pub struct ModelCheck {
+    /// Raw `MODEL` word.
+    pub device_code: u16,
+    /// The fixed-point scales this driver decodes with are known to match.
+    /// When false, readings may be out by a factor of ten.
+    pub scales_match: bool,
+    /// The physical write limits this driver enforces (70 V, 25 A, and the
+    /// rest of the XY7025's) are known to suit this device.
+    pub limits_match: bool,
 }
 
 /// High-level driver for the XY7025.
 ///
 /// Construct with [`Xy::new`] (default slave `0x01`) or
-/// [`Xy::with_slave`]. Call [`Self::verify_scale_family`] during bring-up to
-/// catch devices whose fixed-point scales are not known to be compatible.
+/// [`Xy::with_slave`]. Call [`Self::check_model`] during bring-up to catch a
+/// device whose scales or physical limits differ from what this driver
+/// assumes.
 #[derive(Debug)]
 pub struct Xy<T: ModbusTransport> {
     transport: T,
@@ -464,7 +475,7 @@ impl<T: ModbusTransport> Xy<T> {
     /// Writing a V-SET above the live S-OVP latches OVP on the device, so the
     /// threshold is read first and such a setpoint is rejected with
     /// [`InputError::VoltageSetpointAboveProtection`] rather than sent. Raise
-    /// protection with [`Self::set_protection`] before raising the setpoint.
+    /// protection with [`Self::set_safety_limits`] before raising the setpoint.
     /// The read and the write are separate transactions, so a concurrent
     /// controller can still lower S-OVP in between.
     pub fn set_voltage(&mut self, volts: f32) -> Result<(), XyError> {
@@ -489,7 +500,7 @@ impl<T: ModbusTransport> Xy<T> {
     /// V-SET with [`Self::set_voltage`] first. The read and the write are
     /// separate transactions, so a concurrent controller can still raise V-SET
     /// in between.
-    pub fn set_protection(&mut self, l: SafetyLimits) -> Result<(), XyError> {
+    pub fn set_safety_limits(&mut self, l: SafetyLimits) -> Result<(), XyError> {
         let lvp = to_reg(Reg::SLvp, l.lvp_v)?;
         let ovp = to_reg(Reg::SOvp, l.ovp_v)?;
         let ocp = to_reg(Reg::SOcp, l.ocp_a)?;
@@ -500,7 +511,7 @@ impl<T: ModbusTransport> Xy<T> {
     }
 
     /// Read LVP / OVP / OCP from the active group (0x0052–0x0054).
-    pub fn read_protection(&mut self) -> Result<SafetyLimits, XyError> {
+    pub fn read_safety_limits(&mut self) -> Result<SafetyLimits, XyError> {
         const BASE: Reg = Reg::SLvp;
         const LVP: usize = regs::offset_in(BASE, Reg::SLvp);
         const OVP: usize = regs::offset_in(BASE, Reg::SOvp);
@@ -638,19 +649,22 @@ impl<T: ModbusTransport> Xy<T> {
         self.read_word(Reg::Model)
     }
 
-    /// Read the device's `MODEL` register and check whether it belongs to the
-    /// XY7025 scale family. This catches the footgun where `read_status().i_out`
-    /// silently comes back 10× off, but it does not prove exact hardware
-    /// identity or physical limits.
+    /// Read `MODEL` and report what it implies about this driver's
+    /// assumptions. Worth calling once during bring-up.
     ///
-    /// Returns [`ScaleCheck::Inconclusive`] for unknown device codes.
-    pub fn verify_scale_family(&mut self) -> Result<ScaleCheck, XyError> {
+    /// `0x6500` (XY7025) is the model this crate's scales *and* limits were
+    /// written for. `0x6100`-class devices share the scales, so readings
+    /// decode correctly, but their ceilings are lower than the ones
+    /// [`Self::set_voltage`] and friends enforce — use the raw layers there.
+    /// An unrecognised code sets both flags false; it does not prove
+    /// incompatibility, only that nothing is known.
+    pub fn check_model(&mut self) -> Result<ModelCheck, XyError> {
         let device_code = self.read_model()?;
-        if matches!(device_code, 0x6100 | 0x6500) {
-            Ok(ScaleCheck::Compatible { device_code })
-        } else {
-            Ok(ScaleCheck::Inconclusive { device_code })
-        }
+        Ok(ModelCheck {
+            device_code,
+            scales_match: matches!(device_code, 0x6100 | 0x6500),
+            limits_match: device_code == 0x6500,
+        })
     }
 
     /// Firmware version (e.g. `0x0071`).

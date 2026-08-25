@@ -22,8 +22,12 @@ pub struct Status {
     pub i_out: f32,
     pub p_out: f32,
     pub v_in: f32,
-    /// `PROTECT` register (0x0010). Necessarily `Normal` while
-    /// [`Self::output_on`] is true.
+    /// `PROTECT` register (0x0010).
+    ///
+    /// Expected to read `Normal` while [`Self::output_on`] is true, since a
+    /// trip disables the output — but that is inference from the datasheet,
+    /// not something the on-device suite asserts. Do not rely on it to skip
+    /// reading the cause.
     pub protection: ProtectionStatus,
     /// `CVCC` register (0x0011) — current regulation mode.
     pub reg_mode: RegMode,
@@ -75,7 +79,8 @@ impl Temperature {
         let value = match (self.unit, unit) {
             (TempUnit::Celsius, TempUnit::Fahrenheit) => self.value * 9.0 / 5.0 + 32.0,
             (TempUnit::Fahrenheit, TempUnit::Celsius) => (self.value - 32.0) * 5.0 / 9.0,
-            _ => self.value,
+            (TempUnit::Celsius, TempUnit::Celsius)
+            | (TempUnit::Fahrenheit, TempUnit::Fahrenheit) => self.value,
         };
         Self { value, unit }
     }

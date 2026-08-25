@@ -18,7 +18,7 @@
 //! use xy_modbus::{SafetyLimits, Xy};
 //!
 //! let mut xy = Xy::new(my_transport);
-//! xy.set_protection(SafetyLimits { lvp_v: 22.0, ovp_v: 15.0, ocp_a: 15.0 })?;
+//! xy.set_safety_limits(SafetyLimits { lvp_v: 22.0, ovp_v: 15.0, ocp_a: 15.0 })?;
 //! xy.set_voltage(13.5)?;
 //! xy.set_current_limit(10.0)?;
 //! xy.set_output(true)?;
@@ -68,7 +68,7 @@ pub mod uart;
 #[cfg(all(feature = "esp-idf-hal", target_os = "espidf"))]
 pub mod esp_idf;
 
-pub use device::{ScaleCheck, Xy};
+pub use device::{ModelCheck, Xy};
 pub use error::{InputError, InputField, IoErrorKind, IoOperation, RtuError, XyError};
 pub use types::enums::{BaudRate, ProtectionStatus, RegMode, TempUnit};
 pub use types::group::GroupParams;

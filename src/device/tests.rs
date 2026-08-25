@@ -149,7 +149,7 @@ fn set_protection_uses_bulk_write() {
         },
     ]);
     let mut xy = Xy::new(mock);
-    xy.set_protection(LIMITS).unwrap();
+    xy.set_safety_limits(LIMITS).unwrap();
 
     // Equal is allowed: a 15.00 V threshold against a 15.00 V setpoint.
     let mut xy = Xy::new(MockTransport::new(vec![
@@ -162,7 +162,7 @@ fn set_protection_uses_bulk_write() {
             values: vec![1000, 1500, 1250],
         },
     ]));
-    xy.set_protection(LIMITS).unwrap();
+    xy.set_safety_limits(LIMITS).unwrap();
 
     // One raw count below the live setpoint is rejected before the bulk write.
     let mut xy = Xy::new(MockTransport::new(vec![Op::Read {
@@ -170,7 +170,7 @@ fn set_protection_uses_bulk_write() {
         values: vec![1501],
     }]));
     assert_eq!(
-        xy.set_protection(LIMITS),
+        xy.set_safety_limits(LIMITS),
         Err(XyError::Input(InputError::VoltageSetpointAboveProtection))
     );
 }
@@ -182,7 +182,7 @@ fn read_protection_decodes_three_regs() {
         values: vec![1000, 1500, 1250],
     }]);
     let mut xy = Xy::new(mock);
-    let l = xy.read_protection().unwrap();
+    let l = xy.read_safety_limits().unwrap();
     assert_eq!(l.lvp_v, 10.0);
     assert_eq!(l.ovp_v, 15.0);
     assert_eq!(l.ocp_a, 12.5);
@@ -1062,7 +1062,7 @@ fn invalid_inputs_fail_before_transport_io() {
 
     let mut xy = Xy::new(MockTransport::new(vec![]));
     assert_eq!(
-        xy.set_protection(SafetyLimits {
+        xy.set_safety_limits(SafetyLimits {
             lvp_v: 9.99,
             ovp_v: 15.0,
             ocp_a: 12.5,
@@ -1159,7 +1159,7 @@ fn register_conversions_preserve_precision_and_physical_ranges() {
 }
 
 #[test]
-fn verify_scale_family_compatible_for_xy7025() {
+fn check_model_separates_scales_from_limits() {
     let mut xy = Xy::new(MockTransport::new(vec![
         Op::Read {
             addr: Reg::Model.addr(),
@@ -1170,30 +1170,39 @@ fn verify_scale_family_compatible_for_xy7025() {
             values: vec![0x6100],
         },
     ]));
+    // XY7025: this driver's scales *and* limits were written for it.
     assert_eq!(
-        xy.verify_scale_family().unwrap(),
-        ScaleCheck::Compatible {
-            device_code: 0x6500
+        xy.check_model().unwrap(),
+        ModelCheck {
+            device_code: 0x6500,
+            scales_match: true,
+            limits_match: true,
         }
     );
+    // 0x6100-class shares the scales but not the ceilings, which is exactly
+    // the distinction the single old `Compatible` variant could not express.
     assert_eq!(
-        xy.verify_scale_family().unwrap(),
-        ScaleCheck::Compatible {
-            device_code: 0x6100
+        xy.check_model().unwrap(),
+        ModelCheck {
+            device_code: 0x6100,
+            scales_match: true,
+            limits_match: false,
         }
     );
 }
 
 #[test]
-fn verify_scale_family_is_inconclusive_for_unknown_code() {
+fn check_model_knows_nothing_about_an_unknown_code() {
     let mut xy = Xy::new(MockTransport::new(vec![Op::Read {
         addr: Reg::Model.addr(),
         values: vec![0x7700],
     }]));
     assert_eq!(
-        xy.verify_scale_family().unwrap(),
-        ScaleCheck::Inconclusive {
-            device_code: 0x7700
+        xy.check_model().unwrap(),
+        ModelCheck {
+            device_code: 0x7700,
+            scales_match: false,
+            limits_match: false,
         }
     );
 }

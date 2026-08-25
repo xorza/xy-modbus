@@ -732,3 +732,57 @@ fn pre_existing_rx_is_drained() {
     t.read_holding(0x01, 0x0000, &mut out).unwrap();
     assert_eq!(out, [5]);
 }
+
+/// A driver that never stops reporting `Interrupted` must fail rather than
+/// spin forever. The budget is spent inside the pre-transmit drain, so this
+/// also proves nothing was transmitted.
+#[test]
+fn endless_interrupts_fail_instead_of_hanging() {
+    #[derive(Debug)]
+    struct InterruptingUart {
+        reads: usize,
+        writes: usize,
+    }
+
+    impl ErrorType for InterruptingUart {
+        type Error = embedded_io::ErrorKind;
+    }
+
+    impl BlockingRead for InterruptingUart {
+        fn read(&mut self, _buf: &mut [u8], _timeout_ms: u32) -> Result<usize, Self::Error> {
+            self.reads += 1;
+            Err(embedded_io::ErrorKind::Interrupted)
+        }
+    }
+
+    impl embedded_io::Write for InterruptingUart {
+        fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            self.writes += 1;
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    let uart = InterruptingUart {
+        reads: 0,
+        writes: 0,
+    };
+    let mut transport = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
+    let mut out = [0u16; 1];
+    assert_eq!(
+        transport.read_holding(0x01, 0x0000, &mut out),
+        Err(RtuError::Io {
+            operation: IoOperation::Read,
+            kind: IoErrorKind::Interrupted,
+        })
+    );
+
+    let parts = transport.into_parts();
+    // The budget allows MAX_INTERRUPT_RETRIES retries; the call that exhausts
+    // it is the one reported.
+    assert_eq!(parts.uart.reads, MAX_INTERRUPT_RETRIES as usize + 1);
+    assert_eq!(parts.uart.writes, 0);
+}
