@@ -89,29 +89,90 @@ fn status_fixture(live: [u16; 6]) -> Vec<u16> {
 
 #[test]
 fn set_voltage_scales_correctly() {
-    // 14.40 V → 1440 raw.
-    let mock = MockTransport::new(vec![Op::WriteOne {
-        addr: REG_V_SET,
-        value: 1440,
-    }]);
+    // 14.40 V → 1440 raw, against a live 72.00 V S-OVP.
+    let mock = MockTransport::new(vec![
+        Op::Read {
+            addr: REG_S_OVP,
+            values: vec![7200],
+        },
+        Op::WriteOne {
+            addr: REG_V_SET,
+            value: 1440,
+        },
+    ]);
     let mut xy = Xy::new(mock);
     xy.set_voltage(14.40).unwrap();
+
+    // Equal is allowed: 14.40 V against a 14.40 V threshold.
+    let mut xy = Xy::new(MockTransport::new(vec![
+        Op::Read {
+            addr: REG_S_OVP,
+            values: vec![1440],
+        },
+        Op::WriteOne {
+            addr: REG_V_SET,
+            value: 1440,
+        },
+    ]));
+    xy.set_voltage(14.40).unwrap();
+
+    // One raw count above the live threshold is rejected. The mock panics on
+    // drop with an unconsumed script, so this also proves no write was sent.
+    let mut xy = Xy::new(MockTransport::new(vec![Op::Read {
+        addr: REG_S_OVP,
+        values: vec![1439],
+    }]));
+    assert_eq!(
+        xy.set_voltage(14.40),
+        Err(XyError::Input(InputError::VoltageSetpointAboveProtection))
+    );
 }
 
 #[test]
 fn set_protection_uses_bulk_write() {
-    // LVP=10.00, OVP=15.00, OCP=12.50 → raw 1000, 1500, 1250.
-    let mock = MockTransport::new(vec![Op::WriteMany {
-        addr: REG_S_LVP,
-        values: vec![1000, 1500, 1250],
-    }]);
-    let mut xy = Xy::new(mock);
-    xy.set_protection(SafetyLimits {
+    const LIMITS: SafetyLimits = SafetyLimits {
         lvp_v: 10.0,
         ovp_v: 15.0,
         ocp_a: 12.5,
-    })
-    .unwrap();
+    };
+
+    // LVP=10.00, OVP=15.00, OCP=12.50 → raw 1000, 1500, 1250, against a live
+    // 14.40 V setpoint.
+    let mock = MockTransport::new(vec![
+        Op::Read {
+            addr: REG_V_SET,
+            values: vec![1440],
+        },
+        Op::WriteMany {
+            addr: REG_S_LVP,
+            values: vec![1000, 1500, 1250],
+        },
+    ]);
+    let mut xy = Xy::new(mock);
+    xy.set_protection(LIMITS).unwrap();
+
+    // Equal is allowed: a 15.00 V threshold against a 15.00 V setpoint.
+    let mut xy = Xy::new(MockTransport::new(vec![
+        Op::Read {
+            addr: REG_V_SET,
+            values: vec![1500],
+        },
+        Op::WriteMany {
+            addr: REG_S_LVP,
+            values: vec![1000, 1500, 1250],
+        },
+    ]));
+    xy.set_protection(LIMITS).unwrap();
+
+    // One raw count below the live setpoint is rejected before the bulk write.
+    let mut xy = Xy::new(MockTransport::new(vec![Op::Read {
+        addr: REG_V_SET,
+        values: vec![1501],
+    }]));
+    assert_eq!(
+        xy.set_protection(LIMITS),
+        Err(XyError::Input(InputError::VoltageSetpointAboveProtection))
+    );
 }
 
 #[test]
@@ -348,45 +409,56 @@ fn write_group_round_trips_through_encode() {
 }
 
 #[test]
-fn live_group_stages_both_protection_crossing_directions() {
-    #[derive(Copy, Clone, Debug)]
-    struct StageWrite {
-        addr: u16,
-        value: u16,
-    }
-
+fn live_group_rejects_protection_crossing_in_either_direction() {
     #[derive(Debug)]
     struct Case {
+        /// Live M0 registers 0x0050..=0x0053 (V-SET, I-SET, S-LVP, S-OVP).
         current: [u16; 4],
         target_v_set: u16,
         target_ovp: u16,
-        stages: &'static [StageWrite],
+        accepted: bool,
     }
 
     let cases = [
+        // New V-SET 14.40 is above the live 13.00 S-OVP, so applying V-SET
+        // before S-OVP would trip OVP.
         Case {
             current: [1200, 1000, 1000, 1300],
             target_v_set: 1440,
             target_ovp: 1500,
-            stages: &[StageWrite {
-                addr: REG_S_OVP,
-                value: 1500,
-            }],
+            accepted: false,
         },
+        // New S-OVP 15.00 is below the live 16.00 V-SET, so applying S-OVP
+        // before V-SET would trip OVP.
         Case {
             current: [1600, 1000, 1000, 1700],
             target_v_set: 1400,
             target_ovp: 1500,
-            stages: &[StageWrite {
-                addr: REG_V_SET,
-                value: 1400,
-            }],
+            accepted: false,
         },
+        // Both orderings clear: 1440 <= live 1500 and 1500 >= live 1400.
         Case {
             current: [1400, 1000, 1000, 1500],
             target_v_set: 1440,
             target_ovp: 1500,
-            stages: &[],
+            accepted: true,
+        },
+        // Equality on both bounds is clear — the comparisons are strict.
+        Case {
+            current: [1440, 1000, 1000, 1440],
+            target_v_set: 1440,
+            target_ovp: 1440,
+            accepted: true,
+        },
+        // Device already violates V-SET <= S-OVP (live 50.00 V against a
+        // 20.00 V threshold). Both crossing conditions hold at once here:
+        // staging the new 40.00 V S-OVP first would have left the old 50.00 V
+        // V-SET above it and tripped OVP, so this must be rejected outright.
+        Case {
+            current: [5000, 1000, 1000, 2000],
+            target_v_set: 3000,
+            target_ovp: 4000,
+            accepted: false,
         },
     ];
 
@@ -438,23 +510,30 @@ fn live_group_stages_both_protection_crossing_directions() {
                 values: case.current.to_vec(),
             },
         ];
-        for stage in case.stages {
-            script.push(Op::WriteOne {
-                addr: stage.addr,
-                value: stage.value,
+        if case.accepted {
+            script.push(Op::WriteMany {
+                addr: group_addr(0),
+                values: values.clone(),
+            });
+            script.push(Op::Read {
+                addr: group_addr(0),
+                values,
             });
         }
-        script.push(Op::WriteMany {
-            addr: group_addr(0),
-            values: values.clone(),
-        });
-        script.push(Op::Read {
-            addr: group_addr(0),
-            values,
-        });
 
+        // A rejected case scripts only the two reads, so the mock's
+        // drop-time check proves nothing was written.
         let mut xy = Xy::new(MockTransport::new(script));
-        assert_eq!(xy.write_group(0, &p).unwrap(), p, "{case:?}");
+        let result = xy.write_group(0, &p);
+        if case.accepted {
+            assert_eq!(result.unwrap(), p, "{case:?}");
+        } else {
+            assert_eq!(
+                result,
+                Err(XyError::Input(InputError::VoltageSetpointAboveProtection)),
+                "{case:?}"
+            );
+        }
     }
 }
 
@@ -584,8 +663,22 @@ fn one_shot_setters_use_correct_addr_and_value() {
             let mut xy = Xy::new(mock);
             $action(&mut xy).unwrap();
         }};
+        ($addr:expr, $value:expr, $action:expr, guard $guard:expr => $raw:expr) => {{
+            let mock = MockTransport::new(vec![
+                Op::Read {
+                    addr: $guard,
+                    values: vec![$raw],
+                },
+                Op::WriteOne {
+                    addr: $addr,
+                    value: $value,
+                },
+            ]);
+            let mut xy = Xy::new(mock);
+            $action(&mut xy).unwrap();
+        }};
     }
-    check!(REG_V_SET, 1440, |x: &mut Xy<_>| x.set_voltage(14.40));
+    check!(REG_V_SET, 1440, |x: &mut Xy<_>| x.set_voltage(14.40), guard REG_S_OVP => 7200);
     check!(REG_I_SET, 500, |x: &mut Xy<_>| x.set_current_limit(5.00));
     check!(REG_OUTPUT_EN, 1, |x: &mut Xy<_>| x.set_output(true));
     check!(REG_OUTPUT_EN, 0, |x: &mut Xy<_>| x.set_output(false));
@@ -693,6 +786,35 @@ fn one_shot_getters_use_correct_addr_and_scale() {
             unit: TempUnit::Fahrenheit,
         }
     );
+
+    // T-IN is two's-complement signed. 0xFFCE = -50 as i16 -> -5.0 degC;
+    // unsigned decoding would read 65486 / 10 = 6548.6.
+    let mut xy = Xy::new(MockTransport::new(vec![Op::Read {
+        addr: REG_T_IN,
+        values: vec![0xFFCE, 0, 0, 0, 0, 0, 0],
+    }]));
+    assert_eq!(
+        xy.read_temperature_internal().unwrap(),
+        Temperature {
+            value: -5.0,
+            unit: TempUnit::Celsius,
+        }
+    );
+
+    // Both ends of the i16 range: 0x8000 = -32768 -> -3276.8,
+    // 0x7FFF = 32767 -> 3276.7.
+    let mut xy = Xy::new(MockTransport::new(vec![
+        Op::Read {
+            addr: REG_T_IN,
+            values: vec![0x8000, 0, 0, 0, 0, 0, 0],
+        },
+        Op::Read {
+            addr: REG_T_IN,
+            values: vec![0x7FFF, 0, 0, 0, 0, 0, 0],
+        },
+    ]));
+    assert_eq!(xy.read_temperature_internal().unwrap().value, -3276.8);
+    assert_eq!(xy.read_temperature_internal().unwrap().value, 3276.7);
 }
 
 #[test]

@@ -78,13 +78,6 @@ fn from_reg_u16(raw: u16, scale: f32) -> f32 {
     raw as f32 / scale
 }
 
-fn decode_setpoints(v_set: u16, i_set: u16, current_scale: f32) -> Setpoints {
-    Setpoints {
-        v_set: from_reg_u16(v_set, 100.0),
-        i_set: from_reg_u16(i_set, current_scale),
-    }
-}
-
 fn from_reg_i16(raw: u16, scale: f32) -> f32 {
     raw as i16 as f32 / scale
 }
@@ -92,6 +85,13 @@ fn from_reg_i16(raw: u16, scale: f32) -> f32 {
 fn from_reg_u32(low: u16, high: u16, scale: f64) -> f64 {
     let raw = ((high as u32) << 16) | low as u32;
     raw as f64 / scale
+}
+
+fn decode_setpoints(v_set: u16, i_set: u16, current_scale: f32) -> Setpoints {
+    Setpoints {
+        v_set: from_reg_u16(v_set, 100.0),
+        i_set: from_reg_u16(i_set, current_scale),
+    }
 }
 
 #[derive(Debug)]
@@ -121,6 +121,21 @@ fn to_reg_u32(
         low: raw as u16,
         high: (raw >> 16) as u16,
     })
+}
+
+/// Offsets of V-SET and S-OVP within a memory group's 14 registers. A group's
+/// first two registers are its V-SET / I-SET; for M0 they are the live pair
+/// mirrored at [`REG_V_SET`] / [`REG_I_SET`].
+const GROUP_V_SET_OFFSET: usize = 0;
+const GROUP_S_OVP_OFFSET: usize = (REG_S_OVP - GROUP_BASE) as usize;
+
+/// The device latches OVP the moment a V-SET above the S-OVP threshold
+/// applies, so every path that moves either register checks the pair first.
+fn check_v_set_under_ovp(v_set: u16, ovp: u16) -> Result<(), InputError> {
+    if v_set > ovp {
+        return Err(InputError::VoltageSetpointAboveProtection);
+    }
+    Ok(())
 }
 
 fn validate_slave(slave: u8) -> Result<(), InputError> {
@@ -292,11 +307,17 @@ impl<T: ModbusTransport> Xy<T> {
         })
     }
 
-    /// Set output voltage (V-SET, register 0x0000). Note: writing a
-    /// V-SET higher than the current S-OVP latches OVP immediately —
-    /// program protection (see [`Self::set_protection`]) first.
+    /// Set output voltage (V-SET, register 0x0000).
+    ///
+    /// Writing a V-SET above the live S-OVP latches OVP on the device, so the
+    /// threshold is read first and such a setpoint is rejected with
+    /// [`InputError::VoltageSetpointAboveProtection`] rather than sent. Raise
+    /// protection with [`Self::set_protection`] before raising the setpoint.
+    /// The read and the write are separate transactions, so a concurrent
+    /// controller can still lower S-OVP in between.
     pub fn set_voltage(&mut self, volts: f32) -> Result<(), XyError> {
         let raw = to_reg_u16(volts, 100.0, VOLTAGE_SET_RANGE, InputField::VoltageSetpoint)?;
+        check_v_set_under_ovp(raw, self.read_one(REG_S_OVP)?)?;
         self.write_one(REG_V_SET, raw)
     }
 
@@ -312,19 +333,25 @@ impl<T: ModbusTransport> Xy<T> {
 
     /// Program LVP / OVP / OCP into the active group's protection
     /// registers (0x0052–0x0054) in one bulk write.
+    ///
+    /// An S-OVP below the live V-SET would latch OVP the moment it applied, so
+    /// the setpoint is read first and such a threshold is rejected with
+    /// [`InputError::VoltageSetpointAboveProtection`] rather than sent. Lower
+    /// V-SET with [`Self::set_voltage`] first. The read and the write are
+    /// separate transactions, so a concurrent controller can still raise V-SET
+    /// in between.
     pub fn set_protection(&mut self, l: SafetyLimits) -> Result<(), XyError> {
-        let values = [
-            to_reg_u16(l.lvp_v, 100.0, LVP_RANGE, InputField::LowVoltageProtection)?,
-            to_reg_u16(l.ovp_v, 100.0, OVP_RANGE, InputField::OverVoltageProtection)?,
-            to_reg_u16(
-                l.ocp_a,
-                CURRENT_SCALE,
-                OCP_RANGE,
-                InputField::OverCurrentProtection,
-            )?,
-        ];
+        let lvp = to_reg_u16(l.lvp_v, 100.0, LVP_RANGE, InputField::LowVoltageProtection)?;
+        let ovp = to_reg_u16(l.ovp_v, 100.0, OVP_RANGE, InputField::OverVoltageProtection)?;
+        let ocp = to_reg_u16(
+            l.ocp_a,
+            CURRENT_SCALE,
+            OCP_RANGE,
+            InputField::OverCurrentProtection,
+        )?;
+        check_v_set_under_ovp(self.read_one(REG_V_SET)?, ovp)?;
         self.transport
-            .write_multiple_holdings(self.slave, REG_S_LVP, &values)?;
+            .write_multiple_holdings(self.slave, REG_S_LVP, &[lvp, ovp, ocp])?;
         Ok(())
     }
 
@@ -383,9 +410,13 @@ impl<T: ModbusTransport> Xy<T> {
     }
 
     /// Read the verified internal sensor and its unit in one register snapshot.
+    /// The reading is two's-complement signed, so sub-zero ambients decode
+    /// correctly.
+    ///
     /// The external-probe register remains available through
     /// [`Self::read_raw_holding`], but is not exposed at the high level because
-    /// its connected-probe scale has not been verified on hardware.
+    /// its connected-probe scale has not been verified on hardware. It is
+    /// signed on the same basis as this one — decode it as `i16`, not `u16`.
     pub fn read_temperature_internal(&mut self) -> Result<Temperature, XyError> {
         const LEN: usize = (REG_TEMP_UNIT - REG_T_IN + 1) as usize;
         let mut r = [0u16; LEN];
@@ -396,7 +427,7 @@ impl<T: ModbusTransport> Xy<T> {
             TempUnit::from_reg,
         )?;
         Ok(Temperature {
-            value: from_reg_u16(r[0], 10.0),
+            value: from_reg_i16(r[0], 10.0),
             unit,
         })
     }
@@ -558,8 +589,14 @@ impl<T: ModbusTransport> Xy<T> {
     /// Write all 14 registers of memory group `n` (0–9), then return the values
     /// stored by the device after temperature conversion and rounding.
     ///
-    /// For M0 this updates the live operating set. Valid V-SET/S-OVP crossings
-    /// are staged safely while the FC10 application order remains unverified.
+    /// For M0 this updates the live operating set, moving V-SET and S-OVP in
+    /// one frame. The order in which the device applies the registers of an
+    /// FC16 is unverified, so both are read first and the write is rejected
+    /// with [`InputError::VoltageSetpointAboveProtection`] unless every
+    /// possible ordering stays clear of an OVP trip: the new V-SET must sit at
+    /// or below the live S-OVP, and the new S-OVP at or above the live V-SET.
+    /// (Encoding has already checked the new V-SET and S-OVP against each
+    /// other.)
     /// F-C must not be changed concurrently through another controller or the
     /// front panel while this operation is in progress.
     pub fn write_group(&mut self, n: u8, p: &GroupParams) -> Result<GroupParams, XyError> {
@@ -568,17 +605,14 @@ impl<T: ModbusTransport> Xy<T> {
         let unit = self.read_temp_unit()?;
         let regs = encoding.for_unit(unit)?;
         if n == 0 {
-            const V_SET_OFFSET: usize = 0;
-            const S_OVP_OFFSET: usize = (REG_S_OVP - GROUP_BASE) as usize;
-            let mut current = [0u16; S_OVP_OFFSET + 1];
+            // V-SET and S-OVP are three registers apart, so one read of the
+            // span costs less than two single-register transactions.
+            let mut current = [0u16; GROUP_S_OVP_OFFSET + 1];
             self.transport
                 .read_holding(self.slave, GROUP_BASE, &mut current)?;
-            if regs[V_SET_OFFSET] > current[S_OVP_OFFSET] {
-                self.write_one(REG_S_OVP, regs[S_OVP_OFFSET])?;
-            }
-            if regs[S_OVP_OFFSET] < current[V_SET_OFFSET] {
-                self.write_one(REG_V_SET, regs[V_SET_OFFSET])?;
-            }
+            // Either register may land first, so both pairings must clear.
+            check_v_set_under_ovp(regs[GROUP_V_SET_OFFSET], current[GROUP_S_OVP_OFFSET])?;
+            check_v_set_under_ovp(current[GROUP_V_SET_OFFSET], regs[GROUP_S_OVP_OFFSET])?;
         }
         self.transport
             .write_multiple_holdings(self.slave, group_addr(n), &regs)?;
@@ -718,9 +752,7 @@ fn encode_group(p: &GroupParams) -> Result<GroupEncoding, InputError> {
         0,
         p.power_on_output as u16,
     ];
-    if values[0] > values[3] {
-        return Err(InputError::VoltageSetpointAboveProtection);
-    }
+    check_v_set_under_ovp(values[GROUP_V_SET_OFFSET], values[GROUP_S_OVP_OFFSET])?;
     Ok(GroupEncoding {
         values,
         s_otp: p.s_otp,

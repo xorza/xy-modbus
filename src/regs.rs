@@ -3,6 +3,15 @@
 //! All registers are 16-bit. Where a value is fixed-point, the *scale*
 //! is the divisor to apply to the raw integer to obtain the physical
 //! value (so a raw `1440` at scale `100` is `14.40`).
+//!
+//! Registers are unsigned unless the entry below says otherwise. The four
+//! temperature registers are two's-complement signed. That encoding is
+//! inferred rather than vendor-documented — no XY datasheet or community
+//! source records it — but signed is the safe reading either way: raw
+//! `0x8000..=0xFFFF` decodes to −3276.8..−0.1, which a sensor can plausibly
+//! report, against 3276.8..6553.5 unsigned, which it cannot. If the firmware
+//! does clamp at zero those raw values never appear and both decodings agree
+//! on every value that does.
 
 /// Default Modbus slave address. Reconfigurable via [`REG_SLAVE_ADDR`];
 /// the new value only takes effect after the device resets.
@@ -35,10 +44,10 @@ pub(crate) const REG_OUT_H: u16 = 0x000A;
 pub(crate) const REG_OUT_M: u16 = 0x000B;
 /// OUT-S — output-on time, seconds.
 pub(crate) const REG_OUT_S: u16 = 0x000C;
-/// T-IN — internal temperature. Scale 10 (°C/°F per [`REG_TEMP_UNIT`]).
+/// T-IN — internal temperature. Signed, scale 10 (°C/°F per [`REG_TEMP_UNIT`]).
 pub(crate) const REG_T_IN: u16 = 0x000D;
-/// T-EX — external probe temperature. Connected-probe scale is unverified;
-/// intentionally available only through raw register access.
+/// T-EX — external probe temperature. Signed. Connected-probe scale is
+/// unverified; intentionally available only through raw register access.
 pub(crate) const REG_T_EX: u16 = 0x000E;
 /// LOCK — front-panel key lock (0 unlocked, 1 locked).
 pub(crate) const REG_LOCK: u16 = 0x000F;
@@ -62,9 +71,9 @@ pub(crate) const REG_VERSION: u16 = 0x0017;
 pub(crate) const REG_SLAVE_ADDR: u16 = 0x0018;
 /// BAUDRATE_L — baud-rate code (see [`crate::types::BaudRate`]).
 pub(crate) const REG_BAUD_CODE: u16 = 0x0019;
-/// T-IN-OFFSET — internal-temp calibration offset. Scale 10.
+/// T-IN-OFFSET — internal-temp calibration offset. Signed, scale 10.
 pub(crate) const REG_T_IN_OFFSET: u16 = 0x001A;
-/// T-EX-OFFSET — external-temp calibration offset. Scale 10.
+/// T-EX-OFFSET — external-temp calibration offset. Signed, scale 10.
 pub(crate) const REG_T_EX_OFFSET: u16 = 0x001B;
 /// BUZZER — buzzer enable. Often unimplemented in firmware.
 pub(crate) const REG_BUZZER: u16 = 0x001C;
