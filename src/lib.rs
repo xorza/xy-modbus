@@ -30,7 +30,7 @@
 //! ```
 //!
 //! The crate is `no_std`. With the default `embedded-io` feature, the
-//! [`uart`] module provides a ready-to-use [`transport::ModbusTransport`] over any
+//! `uart` module provides a ready-to-use [`transport::ModbusTransport`] over any
 //! `embedded-io` UART. To use a different transport, disable default
 //! features and implement [`transport::ModbusTransport`] yourself; the [`framing`]
 //! module exposes the on-wire codec.

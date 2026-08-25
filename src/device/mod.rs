@@ -371,10 +371,25 @@ impl<T: ModbusTransport> Xy<T> {
         Ok(decode_setpoints(r[V_SET], r[I_SET]))
     }
 
-    /// Read the live + control snapshot (registers 0x0000–0x0012) in
-    /// a single 19-register transaction. Returns everything a supervisor
-    /// needs each tick (live readings, regulation mode, latched
-    /// protection cause, output-enable flag) in one Modbus round-trip.
+    /// Read the live + control snapshot — everything a supervisor needs each
+    /// tick: live readings, regulation mode, latched protection cause, and the
+    /// output-enable flag.
+    ///
+    /// **One transaction**, covering registers 0x0000–0x0012.
+    ///
+    /// Nine of those nineteen registers are used. 0x0006–0x000F — the
+    /// cumulative counters, on-time, temperatures and the key lock — are read
+    /// and discarded, because the fields wanted here sit in two spans
+    /// (0x0000–0x0005 and 0x0010–0x0012) and splitting the read costs a second
+    /// pre-transmit quiet gap. That gap dominates the twenty wasted bytes at
+    /// every baud rate the device supports: with the bundled UART's 50 ms gap,
+    /// one read against two is roughly 54 ms against 104 ms at 115200, and
+    /// 263 ms against 283 ms even at 2400. The split would only pay off below
+    /// about 1400 baud.
+    ///
+    /// The single transaction also keeps the snapshot coherent. Two reads
+    /// could pair a `v_out` sampled before a trip with an `output_on` sampled
+    /// after it.
     pub fn read_status(&mut self) -> Result<Status, XyError> {
         const BASE: Reg = Reg::VSet;
         const V_SET: usize = regs::offset_in(BASE, Reg::VSet);
@@ -532,7 +547,7 @@ impl<T: ModbusTransport> Xy<T> {
     /// stops the front-panel blink but does **not** re-enable the
     /// output — call [`Self::set_output`] separately.
     pub fn clear_protection_status(&mut self) -> Result<(), XyError> {
-        self.write_word(Reg::Protect, 0)
+        self.write_word(Reg::Protect, ProtectionStatus::Normal.code())
     }
 
     pub fn read_reg_mode(&mut self) -> Result<RegMode, XyError> {

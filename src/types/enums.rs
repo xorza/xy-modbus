@@ -1,47 +1,66 @@
 //! Wire-encoded status enums (regulation mode, temperature unit,
 //! protection cause, baud-rate code).
+//!
+//! Each variant carries its wire code as an explicit discriminant, so the
+//! encode direction is a cast and the decode direction is a scan over `ALL`.
+//! That leaves one hand-written table per type — the parts that are genuinely
+//! data, like a display string or a bit rate — instead of a forward table and
+//! a reverse table that can drift apart.
 
 use core::fmt;
 
 /// Regulation mode reported by `CVCC` (register 0x0011).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(u8)]
 pub enum RegMode {
-    ConstantVoltage,
-    ConstantCurrent,
+    ConstantVoltage = 0,
+    ConstantCurrent = 1,
 }
 
 impl RegMode {
+    /// Decode-scan source. `CVCC` is read-only, which is why this type has no
+    /// `code` — there is nothing to write back.
+    const ALL: [Self; 2] = [Self::ConstantVoltage, Self::ConstantCurrent];
+
     pub(crate) const fn from_reg(v: u16) -> Result<Self, u16> {
-        Ok(match v {
-            0 => Self::ConstantVoltage,
-            1 => Self::ConstantCurrent,
-            invalid => return Err(invalid),
-        })
+        let mut i = 0;
+        while i < Self::ALL.len() {
+            if Self::ALL[i] as u16 == v {
+                return Ok(Self::ALL[i]);
+            }
+            i += 1;
+        }
+        Err(v)
     }
 }
 
 /// Temperature unit selected by `F-C` (register 0x0013).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(u8)]
 pub enum TempUnit {
-    Celsius,
-    Fahrenheit,
+    Celsius = 0,
+    Fahrenheit = 1,
 }
 
 impl TempUnit {
+    /// Decode-scan source.
+    const ALL: [Self; 2] = [Self::Celsius, Self::Fahrenheit];
+
     pub(crate) const fn from_reg(v: u16) -> Result<Self, u16> {
-        Ok(match v {
-            0 => Self::Celsius,
-            1 => Self::Fahrenheit,
-            invalid => return Err(invalid),
-        })
-    }
-    pub(crate) const fn code(self) -> u16 {
-        match self {
-            Self::Celsius => 0,
-            Self::Fahrenheit => 1,
+        let mut i = 0;
+        while i < Self::ALL.len() {
+            if Self::ALL[i] as u16 == v {
+                return Ok(Self::ALL[i]);
+            }
+            i += 1;
         }
+        Err(v)
+    }
+
+    pub(crate) const fn code(self) -> u16 {
+        self as u16
     }
 }
 
@@ -51,50 +70,66 @@ impl TempUnit {
 /// latched until written back to 0.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(u8)]
 pub enum ProtectionStatus {
     /// Operating normally.
-    Normal,
+    Normal = 0,
     /// Output overvoltage. Also fires transiently when V-SET is raised
     /// above the current S-OVP threshold — program protection before
     /// raising V-SET.
-    Ovp,
+    Ovp = 1,
     /// Output overcurrent.
-    Ocp,
+    Ocp = 2,
     /// Output overpower.
-    Opp,
+    Opp = 3,
     /// Input under-voltage (LVP setpoint).
-    Lvp,
+    Lvp = 4,
     /// Cumulative charge limit reached.
-    Oah,
+    Oah = 5,
     /// Output-on time limit reached.
-    Ohp,
+    Ohp = 6,
     /// Over-temperature.
-    Otp,
+    Otp = 7,
     /// Internal power-stage/no-output protection. Exact triggers are
     /// model- and firmware-dependent and remain unverified on XY7025.
-    Oep,
+    Oep = 8,
     /// Cumulative energy (Wh) limit reached.
-    Owh,
+    Owh = 9,
     /// Input over-current / inrush.
-    Icp,
+    Icp = 10,
 }
 
 impl ProtectionStatus {
+    /// Decode-scan source, in wire-code order.
+    const ALL: [Self; 11] = [
+        Self::Normal,
+        Self::Ovp,
+        Self::Ocp,
+        Self::Opp,
+        Self::Lvp,
+        Self::Oah,
+        Self::Ohp,
+        Self::Otp,
+        Self::Oep,
+        Self::Owh,
+        Self::Icp,
+    ];
+
+    /// Wire code written back to `PROTECT`. Only `Normal` is useful to write —
+    /// it clears the latch.
+    pub(crate) const fn code(self) -> u16 {
+        self as u16
+    }
+
     pub(crate) const fn from_reg(raw: u16) -> Result<Self, u16> {
-        Ok(match raw {
-            0 => Self::Normal,
-            1 => Self::Ovp,
-            2 => Self::Ocp,
-            3 => Self::Opp,
-            4 => Self::Lvp,
-            5 => Self::Oah,
-            6 => Self::Ohp,
-            7 => Self::Otp,
-            8 => Self::Oep,
-            9 => Self::Owh,
-            10 => Self::Icp,
-            invalid => return Err(invalid),
-        })
+        let mut i = 0;
+        while i < Self::ALL.len() {
+            if Self::ALL[i] as u16 == raw {
+                return Ok(Self::ALL[i]);
+            }
+            i += 1;
+        }
+        Err(raw)
     }
 }
 
@@ -121,48 +156,56 @@ impl fmt::Display for ProtectionStatus {
 /// Only `B115200` (code 6) is documented in the seller manual; codes
 /// 0–5 and 7–8 are community-derived. Verify on your unit before
 /// committing a write. Baud changes take effect after device reset.
+///
+/// The discriminants are the wire codes, which is why the variants are not in
+/// ascending bit-rate order — 2400 and 4800 were appended by the vendor as
+/// codes 7 and 8.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(u8)]
 pub enum BaudRate {
-    B9600,
-    B14400,
-    B19200,
-    B38400,
-    B56000,
-    B57600,
-    B115200,
-    B2400,
-    B4800,
+    B9600 = 0,
+    B14400 = 1,
+    B19200 = 2,
+    B38400 = 3,
+    B56000 = 4,
+    B57600 = 5,
+    B115200 = 6,
+    B2400 = 7,
+    B4800 = 8,
 }
 
 impl BaudRate {
+    /// Decode-scan source, in wire-code order.
+    const ALL: [Self; 9] = [
+        Self::B9600,
+        Self::B14400,
+        Self::B19200,
+        Self::B38400,
+        Self::B56000,
+        Self::B57600,
+        Self::B115200,
+        Self::B2400,
+        Self::B4800,
+    ];
+
     pub(crate) const fn code(self) -> u16 {
-        match self {
-            Self::B9600 => 0,
-            Self::B14400 => 1,
-            Self::B19200 => 2,
-            Self::B38400 => 3,
-            Self::B56000 => 4,
-            Self::B57600 => 5,
-            Self::B115200 => 6,
-            Self::B2400 => 7,
-            Self::B4800 => 8,
-        }
+        self as u16
     }
+
     pub(crate) const fn from_code(code: u16) -> Result<Self, u16> {
-        Ok(match code {
-            0 => Self::B9600,
-            1 => Self::B14400,
-            2 => Self::B19200,
-            3 => Self::B38400,
-            4 => Self::B56000,
-            5 => Self::B57600,
-            6 => Self::B115200,
-            7 => Self::B2400,
-            8 => Self::B4800,
-            invalid => return Err(invalid),
-        })
+        let mut i = 0;
+        while i < Self::ALL.len() {
+            if Self::ALL[i] as u16 == code {
+                return Ok(Self::ALL[i]);
+            }
+            i += 1;
+        }
+        Err(code)
     }
+
+    /// Bits per second. The one part of this type that is not derivable from
+    /// the wire code.
     pub const fn baud(self) -> u32 {
         match self {
             Self::B2400 => 2400,
@@ -184,6 +227,8 @@ mod tests {
     use super::*;
     use std::format;
 
+    /// Every code round-trips, and `ALL` is ordered by code — the decode scan
+    /// and the `as` cast must agree on all eleven.
     #[test]
     fn protection_status_from_reg_full_mapping() {
         let cases = [
@@ -201,6 +246,11 @@ mod tests {
         ];
         for (raw, expected) in cases {
             assert_eq!(ProtectionStatus::from_reg(raw), Ok(expected));
+            assert_eq!(expected.code(), raw);
+        }
+        assert_eq!(cases.len(), ProtectionStatus::ALL.len());
+        for (i, status) in ProtectionStatus::ALL.iter().enumerate() {
+            assert_eq!(status.code() as usize, i);
         }
         assert_eq!(ProtectionStatus::from_reg(11), Err(11));
         assert_eq!(ProtectionStatus::from_reg(u16::MAX), Err(u16::MAX));
@@ -211,8 +261,19 @@ mod tests {
         assert_eq!(format!("{}", ProtectionStatus::Normal), "normal");
         assert_eq!(format!("{}", ProtectionStatus::Ovp), "ovp");
         assert_eq!(format!("{}", ProtectionStatus::Icp), "icp");
+        // Every variant renders distinctly.
+        let mut seen: std::vec::Vec<std::string::String> = ProtectionStatus::ALL
+            .iter()
+            .map(|s| format!("{s}"))
+            .collect();
+        seen.sort();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(seen.len(), before);
     }
 
+    /// The wire codes are deliberately not in ascending bit-rate order, so the
+    /// discriminant and the rate are pinned independently.
     #[test]
     fn baud_rate_full_table() {
         let cases = [
@@ -231,18 +292,22 @@ mod tests {
             assert_eq!(variant.code(), code);
             assert_eq!(variant.baud(), bps);
         }
+        assert_eq!(cases.len(), BaudRate::ALL.len());
+        assert_eq!(BaudRate::from_code(9), Err(9));
         assert_eq!(BaudRate::from_code(99), Err(99));
     }
 
     #[test]
-    fn temp_unit_round_trip() {
+    fn temp_unit_and_reg_mode_round_trip() {
         assert_eq!(TempUnit::from_reg(0), Ok(TempUnit::Celsius));
         assert_eq!(TempUnit::from_reg(1), Ok(TempUnit::Fahrenheit));
+        assert_eq!(TempUnit::from_reg(2), Err(2));
         assert_eq!(TempUnit::from_reg(99), Err(99));
         assert_eq!(TempUnit::Celsius.code(), 0);
         assert_eq!(TempUnit::Fahrenheit.code(), 1);
         assert_eq!(RegMode::from_reg(0), Ok(RegMode::ConstantVoltage));
         assert_eq!(RegMode::from_reg(1), Ok(RegMode::ConstantCurrent));
+        assert_eq!(RegMode::from_reg(2), Err(2));
         assert_eq!(RegMode::from_reg(99), Err(99));
     }
 }

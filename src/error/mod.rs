@@ -12,7 +12,11 @@
 
 use core::fmt;
 
-/// UART operation that failed.
+/// Which UART operation failed.
+///
+/// Carried for diagnosis only — nothing in this crate branches on it. It is
+/// what separates "the device never answered" from "we could not even send",
+/// which are very different faults to chase.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum IoOperation {
@@ -37,6 +41,14 @@ impl fmt::Display for IoOperation {
 /// future upstream categories fall back to [`IoErrorKind::Other`]. Keeping the
 /// classification here lets custom transports use the error API without
 /// enabling the optional `embedded-io` dependency.
+///
+/// It mirrors upstream one-for-one on purpose. Several variants read as
+/// network-shaped and look inapplicable to a serial line, but this crate is
+/// generic over `embedded-io`: a host-side or USB-serial transport really does
+/// surface `NotFound`, `BrokenPipe`, `ConnectionReset` and `PermissionDenied`
+/// when an adapter is unplugged or a port is busy. Collapsing those into
+/// [`IoErrorKind::Other`] would save a dozen variants at the cost of the
+/// diagnosis, and would stop this type representing everything its source can.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
