@@ -5,7 +5,8 @@ use std::vec::Vec;
 use embedded_io::ErrorType;
 
 use super::*;
-use crate::framing::{ModbusError, crc16_modbus};
+use crate::error::RtuError;
+use crate::framing::{MAX_READ_REGS, crc16_modbus};
 
 /// Mock UART: `stale` bytes are visible immediately (simulating
 /// junk in the RX FIFO before the request); `response` bytes only
@@ -165,7 +166,7 @@ fn exception_response_propagates() {
     let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     let mut out = [0u16; 1];
     let err = t.read_holding(0x01, 0x0000, &mut out).unwrap_err();
-    assert_eq!(err, RtuError::Modbus(ModbusError::Exception(0x02)));
+    assert_eq!(err, RtuError::Exception(0x02));
 }
 
 #[test]
@@ -254,7 +255,7 @@ fn bad_crc_propagates() {
     let mut out = [0u16; 3];
     assert_eq!(
         t.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
-        RtuError::Modbus(ModbusError::BadCrc)
+        RtuError::BadCrc
     );
 }
 
@@ -267,7 +268,7 @@ fn wrong_slave_in_response_propagates() {
     let mut out = [0u16; 1];
     assert_eq!(
         t.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
-        RtuError::Modbus(ModbusError::BadSlave(0x02))
+        RtuError::BadSlave(0x02)
     );
 }
 
@@ -548,7 +549,10 @@ fn invalid_slave_addresses_fail_before_uart_io() {
     let uart = MockUart::new(Vec::new());
     let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
     let mut out = [0u16; 1];
-    for slave in [0, 248, 255] {
+    // Slave 0 is rejected on a read for a specific reason — no slave answers a
+    // broadcast — which is more useful than a bare "invalid address".
+    assert_eq!(t.read_holding(0, 0, &mut out), Err(RtuError::BroadcastRead));
+    for slave in [248, 255] {
         assert_eq!(
             t.read_holding(slave, 0, &mut out),
             Err(RtuError::InvalidSlaveAddress(slave))
@@ -642,7 +646,7 @@ fn exception_short_circuits_read() {
     let mut out = [0u16; 3];
     assert_eq!(
         t.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
-        RtuError::Modbus(ModbusError::Exception(0x02))
+        RtuError::Exception(0x02)
     );
 }
 
@@ -654,7 +658,7 @@ fn malformed_complete_responses_return_header_errors_without_timeout() {
     let mut out = [0u16; MAX_READ_REGS];
     assert_eq!(
         transport.read_holding(0x01, 0x0000, &mut out).unwrap_err(),
-        RtuError::Modbus(ModbusError::BadHeader)
+        RtuError::BadHeader
     );
 
     let frame = frame_with_crc(std::vec![0x01, 0x03, 0x02, 0x00, 0x05]);
@@ -662,7 +666,7 @@ fn malformed_complete_responses_return_header_errors_without_timeout() {
     let mut transport = UartTransport::new(uart, NoDelay).with_timing(timing(10, 1, 10));
     assert_eq!(
         transport.write_single_holding(0x01, 0x0012, 1).unwrap_err(),
-        RtuError::Modbus(ModbusError::BadHeader)
+        RtuError::BadHeader
     );
 }
 
@@ -691,6 +695,21 @@ fn invalid_quantities_fail_before_uart_io() {
         Err(RtuError::InvalidQuantity(MAX_WRITE_REGS + 1))
     );
     assert!(transport.into_parts().uart.tx.is_empty());
+}
+
+/// A destination longer than `u16::MAX` must be rejected on its real length.
+/// The request builder takes a `usize` precisely so `65541` cannot narrow to a
+/// valid count of `5` and reach the bus.
+#[test]
+fn read_holding_rejects_oversized_destination_without_wrapping() {
+    let uart = MockUart::new(Vec::new());
+    let mut t = UartTransport::new(uart, NoDelay).with_timing(timing(50, 1, 10));
+    let mut huge = std::vec![0u16; u16::MAX as usize + 6];
+    assert_eq!(
+        t.read_holding(1, 0, &mut huge),
+        Err(RtuError::InvalidQuantity(u16::MAX as usize + 6))
+    );
+    assert!(t.into_parts().uart.tx.is_empty());
 }
 
 #[test]

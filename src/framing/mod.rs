@@ -9,7 +9,7 @@
 //! CRC-16 is the standard reflected polynomial `0xA001`, seeded
 //! `0xFFFF`, no final XOR. The CRC is appended low-byte first.
 
-use core::fmt;
+use crate::error::RtuError;
 
 pub(crate) const FN_READ_HOLDING: u8 = 0x03;
 pub(crate) const FN_WRITE_SINGLE: u8 = 0x06;
@@ -30,72 +30,6 @@ pub const MAX_READ_REGS: usize = 125;
 /// Maximum registers in a single `Write Multiple Holdings` request
 /// (Modbus standard limit).
 pub const MAX_WRITE_REGS: usize = 123;
-
-/// Framing-layer error: a parser input or received frame failed validation.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum ModbusError {
-    /// Caller requested zero registers or exceeded the function-code limit.
-    InvalidQuantity(usize),
-    /// Response was shorter than the expected reply.
-    ShortResponse(usize),
-    /// Slave address byte didn't match the request.
-    BadSlave(u8),
-    /// Function-code, byte-count, address, quantity, or frame length
-    /// didn't match what was expected.
-    BadHeader,
-    /// CRC-16 mismatch.
-    BadCrc,
-    /// Slave returned a Modbus exception. The byte is the exception
-    /// code (`0x01`–`0x0B` per the spec).
-    Exception(u8),
-}
-
-impl fmt::Display for ModbusError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidQuantity(n) => write!(f, "invalid register quantity {n}"),
-            Self::ShortResponse(n) => write!(f, "short response ({n} bytes)"),
-            Self::BadSlave(a) => write!(f, "wrong slave id 0x{a:02X}"),
-            Self::BadHeader => write!(f, "malformed header"),
-            Self::BadCrc => write!(f, "CRC mismatch"),
-            Self::Exception(c) => write!(f, "modbus exception 0x{c:02X}"),
-        }
-    }
-}
-
-impl core::error::Error for ModbusError {}
-
-/// Why a request builder could not assemble a frame.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum FrameError {
-    /// Register quantity was zero or exceeded the function-code limit.
-    InvalidQuantity(usize),
-    /// Read requests cannot use the broadcast address because no slave replies.
-    BroadcastRead,
-    /// Slave address was outside the Modbus range `0..=247`.
-    InvalidSlaveAddress(u8),
-    /// `out` was smaller than the assembled frame (header + payload + CRC).
-    BufferTooSmall { needed: usize, actual: usize },
-}
-
-impl core::fmt::Display for FrameError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::InvalidQuantity(n) => write!(f, "invalid register quantity {n}"),
-            Self::BroadcastRead => f.write_str("read request cannot use broadcast address 0"),
-            Self::InvalidSlaveAddress(address) => {
-                write!(f, "invalid Modbus slave address {address}")
-            }
-            Self::BufferTooSmall { needed, actual } => {
-                write!(f, "buffer too small (need {needed}, have {actual})")
-            }
-        }
-    }
-}
-
-impl core::error::Error for FrameError {}
 
 /// Standard Modbus-RTU CRC-16.
 pub fn crc16_modbus(data: &[u8]) -> u16 {
@@ -119,33 +53,40 @@ fn append_crc(buf: &mut [u8], len: usize) {
     buf[len + 1] = (crc >> 8) as u8;
 }
 
-fn validate_read_slave(slave: u8) -> Result<(), FrameError> {
+/// Check a slave address for a request that expects a response. Address `0`
+/// is [`RtuError::BroadcastRead`] because no slave answers a broadcast.
+///
+/// `ModbusTransport` implementations owe this check before any I/O; calling it
+/// here keeps the `0..=247` rule in one place.
+pub fn validate_read_slave(slave: u8) -> Result<(), RtuError> {
     match slave {
-        0 => Err(FrameError::BroadcastRead),
+        0 => Err(RtuError::BroadcastRead),
         1..=247 => Ok(()),
-        invalid => Err(FrameError::InvalidSlaveAddress(invalid)),
+        invalid => Err(RtuError::InvalidSlaveAddress(invalid)),
     }
 }
 
-fn validate_write_slave(slave: u8) -> Result<(), FrameError> {
+/// Check a slave address for a write, where `0` is a legal broadcast.
+pub fn validate_write_slave(slave: u8) -> Result<(), RtuError> {
     if slave <= 247 {
         Ok(())
     } else {
-        Err(FrameError::InvalidSlaveAddress(slave))
+        Err(RtuError::InvalidSlaveAddress(slave))
     }
 }
 
 /// Build a unicast `Read Holding Registers` (FC `0x03`) request frame.
-pub fn build_read_request(slave: u8, addr: u16, count: u16) -> Result<[u8; 8], FrameError> {
+pub fn build_read_request(slave: u8, addr: u16, count: usize) -> Result<[u8; 8], RtuError> {
     validate_read_slave(slave)?;
-    if count == 0 || count as usize > MAX_READ_REGS {
-        return Err(FrameError::InvalidQuantity(count as usize));
+    if count == 0 || count > MAX_READ_REGS {
+        return Err(RtuError::InvalidQuantity(count));
     }
     let mut req = [0u8; 8];
     req[0] = slave;
     req[1] = FN_READ_HOLDING;
     req[2..4].copy_from_slice(&addr.to_be_bytes());
-    req[4..6].copy_from_slice(&count.to_be_bytes());
+    // Bounded by `MAX_READ_REGS` above, so this cannot truncate.
+    req[4..6].copy_from_slice(&(count as u16).to_be_bytes());
     append_crc(&mut req, 6);
     Ok(req)
 }
@@ -153,7 +94,7 @@ pub fn build_read_request(slave: u8, addr: u16, count: u16) -> Result<[u8; 8], F
 /// Build a `Write Single Holding Register` (FC `0x06`) request frame.
 ///
 /// Slave address `0` creates a broadcast request, for which no response exists.
-pub fn build_write_single_request(slave: u8, addr: u16, value: u16) -> Result<[u8; 8], FrameError> {
+pub fn build_write_single_request(slave: u8, addr: u16, value: u16) -> Result<[u8; 8], RtuError> {
     validate_write_slave(slave)?;
     let mut req = [0u8; 8];
     req[0] = slave;
@@ -174,15 +115,15 @@ pub fn build_write_multiple_request(
     addr: u16,
     values: &[u16],
     out: &mut [u8],
-) -> Result<usize, FrameError> {
+) -> Result<usize, RtuError> {
     validate_write_slave(slave)?;
     if values.is_empty() || values.len() > MAX_WRITE_REGS {
-        return Err(FrameError::InvalidQuantity(values.len()));
+        return Err(RtuError::InvalidQuantity(values.len()));
     }
     let bc = 2 * values.len();
     let len = 7 + bc + 2;
     if out.len() < len {
-        return Err(FrameError::BufferTooSmall {
+        return Err(RtuError::BufferTooSmall {
             needed: len,
             actual: out.len(),
         });
@@ -212,14 +153,14 @@ pub(crate) fn response_adu_len(
     prefix: [u8; 3],
     slave: u8,
     shape: ResponseShape,
-) -> Result<usize, ModbusError> {
+) -> Result<usize, RtuError> {
     if prefix[0] != slave {
-        return Err(ModbusError::BadSlave(prefix[0]));
+        return Err(RtuError::BadSlave(prefix[0]));
     }
     let expected_fn = match shape {
         ResponseShape::ReadHolding { register_count } => {
             if register_count == 0 || register_count > MAX_READ_REGS {
-                return Err(ModbusError::InvalidQuantity(register_count));
+                return Err(RtuError::InvalidQuantity(register_count));
             }
             FN_READ_HOLDING
         }
@@ -230,13 +171,13 @@ pub(crate) fn response_adu_len(
         return Ok(5);
     }
     if prefix[1] != expected_fn {
-        return Err(ModbusError::BadHeader);
+        return Err(RtuError::BadHeader);
     }
     match shape {
         ResponseShape::ReadHolding { register_count } => {
             let byte_count = 2 * register_count;
             if prefix[2] as usize != byte_count {
-                return Err(ModbusError::BadHeader);
+                return Err(RtuError::BadHeader);
             }
             Ok(5 + byte_count)
         }
@@ -244,51 +185,51 @@ pub(crate) fn response_adu_len(
     }
 }
 
-fn check_crc(resp: &[u8], len: usize) -> Result<(), ModbusError> {
+fn check_crc(resp: &[u8], len: usize) -> Result<(), RtuError> {
     if resp.len() < len {
-        return Err(ModbusError::ShortResponse(resp.len()));
+        return Err(RtuError::ShortResponse(resp.len()));
     }
     if resp.len() != len {
-        return Err(ModbusError::BadHeader);
+        return Err(RtuError::BadHeader);
     }
     let got = u16::from_le_bytes([resp[len - 2], resp[len - 1]]);
     let calc = crc16_modbus(&resp[..len - 2]);
     if got == calc {
         Ok(())
     } else {
-        Err(ModbusError::BadCrc)
+        Err(RtuError::BadCrc)
     }
 }
 
-fn check_exception(resp: &[u8], slave: u8, expected_fn: u8) -> Result<(), ModbusError> {
+fn check_exception(resp: &[u8], slave: u8, expected_fn: u8) -> Result<(), RtuError> {
     if resp.len() < 5 {
-        return Err(ModbusError::ShortResponse(resp.len()));
+        return Err(RtuError::ShortResponse(resp.len()));
     }
     if resp[0] != slave {
-        return Err(ModbusError::BadSlave(resp[0]));
+        return Err(RtuError::BadSlave(resp[0]));
     }
     if resp[1] == expected_fn | EXCEPTION_BIT {
         check_crc(resp, 5)?;
-        return Err(ModbusError::Exception(resp[2]));
+        return Err(RtuError::Exception(resp[2]));
     }
     if resp[1] & EXCEPTION_BIT != 0 {
-        return Err(ModbusError::BadHeader);
+        return Err(RtuError::BadHeader);
     }
     Ok(())
 }
 
 /// Parse a `Read Holding Registers` response into `out`. The expected
 /// register count is `out.len()`; zero or more than [`MAX_READ_REGS`] returns
-/// [`ModbusError::InvalidQuantity`].
-pub fn parse_read_response(resp: &[u8], slave: u8, out: &mut [u16]) -> Result<(), ModbusError> {
+/// [`RtuError::InvalidQuantity`].
+pub fn parse_read_response(resp: &[u8], slave: u8, out: &mut [u16]) -> Result<(), RtuError> {
     if out.is_empty() || out.len() > MAX_READ_REGS {
-        return Err(ModbusError::InvalidQuantity(out.len()));
+        return Err(RtuError::InvalidQuantity(out.len()));
     }
     check_exception(resp, slave, FN_READ_HOLDING)?;
     let count = out.len();
     let expected_len = 5 + 2 * count;
     if resp[1] != FN_READ_HOLDING || resp[2] as usize != 2 * count {
-        return Err(ModbusError::BadHeader);
+        return Err(RtuError::BadHeader);
     }
     check_crc(resp, expected_len)?;
     for (i, slot) in out.iter_mut().enumerate() {
@@ -299,11 +240,11 @@ pub fn parse_read_response(resp: &[u8], slave: u8, out: &mut [u16]) -> Result<()
 
 /// Parse a `Write Single Holding Register` response. Per Modbus spec the
 /// response echoes the request byte-for-byte.
-pub fn parse_write_single_response(resp: &[u8], req: &[u8; 8]) -> Result<(), ModbusError> {
+pub fn parse_write_single_response(resp: &[u8], req: &[u8; 8]) -> Result<(), RtuError> {
     check_exception(resp, req[0], FN_WRITE_SINGLE)?;
     check_crc(resp, 8)?;
     if resp != req {
-        return Err(ModbusError::BadHeader);
+        return Err(RtuError::BadHeader);
     }
     Ok(())
 }
@@ -315,14 +256,14 @@ pub fn parse_write_multiple_response(
     slave: u8,
     addr: u16,
     qty: u16,
-) -> Result<(), ModbusError> {
+) -> Result<(), RtuError> {
     check_exception(resp, slave, FN_WRITE_MULTIPLE)?;
     check_crc(resp, 8)?;
     if resp[1] != FN_WRITE_MULTIPLE
         || u16::from_be_bytes([resp[2], resp[3]]) != addr
         || u16::from_be_bytes([resp[4], resp[5]]) != qty
     {
-        return Err(ModbusError::BadHeader);
+        return Err(RtuError::BadHeader);
     }
     Ok(())
 }

@@ -59,7 +59,7 @@ fn build_write_multiple_rejects_empty() {
     let mut buf = [0u8; 32];
     assert!(matches!(
         build_write_multiple_request(0x01, 0x0050, &[], &mut buf),
-        Err(FrameError::InvalidQuantity(0))
+        Err(RtuError::InvalidQuantity(0))
     ));
 }
 
@@ -69,7 +69,7 @@ fn build_write_multiple_rejects_too_small_buffer() {
     let mut buf = [0u8; 10];
     assert!(matches!(
         build_write_multiple_request(0x01, 0x0050, &[1, 2, 3], &mut buf),
-        Err(FrameError::BufferTooSmall {
+        Err(RtuError::BufferTooSmall {
             needed: 15,
             actual: 10
         })
@@ -85,7 +85,7 @@ fn parse_write_multiple_rejects_qty_mismatch() {
     // Frame says qty=3 but caller expects 4.
     assert!(matches!(
         parse_write_multiple_response(&frame, 0x01, 0x0052, 4),
-        Err(ModbusError::BadHeader)
+        Err(RtuError::BadHeader)
     ));
 }
 
@@ -123,7 +123,7 @@ fn parse_read_rejects_wrong_slave() {
     let mut out = [0u16; 1];
     assert!(matches!(
         parse_read_response(&frame, 0x01, &mut out),
-        Err(ModbusError::BadSlave(0x02))
+        Err(RtuError::BadSlave(0x02))
     ));
 }
 
@@ -135,7 +135,7 @@ fn parse_read_rejects_bad_crc() {
     let mut out = [0u16; 1];
     assert!(matches!(
         parse_read_response(&frame, 0x01, &mut out),
-        Err(ModbusError::BadCrc)
+        Err(RtuError::BadCrc)
     ));
 }
 
@@ -148,7 +148,7 @@ fn parse_read_exception_with_valid_crc() {
     let mut out = [0u16; 1];
     assert!(matches!(
         parse_read_response(&frame, 0x01, &mut out),
-        Err(ModbusError::Exception(0x02))
+        Err(RtuError::Exception(0x02))
     ));
 }
 
@@ -158,7 +158,7 @@ fn parse_read_exception_with_bad_crc_is_bad_crc() {
     let mut out = [0u16; 1];
     assert!(matches!(
         parse_read_response(&frame, 0x01, &mut out),
-        Err(ModbusError::BadCrc)
+        Err(RtuError::BadCrc)
     ));
 }
 
@@ -178,7 +178,7 @@ fn parse_write_single_rejects_value_mismatch() {
     resp[7] = (crc >> 8) as u8;
     assert!(matches!(
         parse_write_single_response(&resp, &req),
-        Err(ModbusError::BadHeader)
+        Err(RtuError::BadHeader)
     ));
 }
 
@@ -191,7 +191,7 @@ fn parse_write_single_exception_returns_exception() {
     frame.push((crc >> 8) as u8);
     assert!(matches!(
         parse_write_single_response(&frame, &req),
-        Err(ModbusError::Exception(0x03))
+        Err(RtuError::Exception(0x03))
     ));
 }
 
@@ -214,7 +214,7 @@ fn parse_write_multiple_rejects_fc_mismatch() {
     frame[7] = (crc >> 8) as u8;
     assert!(matches!(
         parse_write_multiple_response(&frame, 0x01, 0x0052, 3),
-        Err(ModbusError::BadHeader)
+        Err(RtuError::BadHeader)
     ));
 }
 
@@ -222,7 +222,7 @@ fn parse_write_multiple_rejects_fc_mismatch() {
 /// would be 5 + 250 = 255 bytes — fits inside MAX_ADU.
 #[test]
 fn build_read_at_max_count_is_well_formed() {
-    let req = build_read_request(0x01, 0x0000, MAX_READ_REGS as u16).unwrap();
+    let req = build_read_request(0x01, 0x0000, MAX_READ_REGS).unwrap();
     assert_eq!(u16::from_be_bytes([req[4], req[5]]), 125);
     let crc = u16::from_le_bytes([req[6], req[7]]);
     assert_eq!(crc, crc16_modbus(&req[..6]));
@@ -232,37 +232,37 @@ fn build_read_at_max_count_is_well_formed() {
 fn build_read_rejects_invalid_requests() {
     assert_eq!(
         build_read_request(0x01, 0x0000, 0),
-        Err(FrameError::InvalidQuantity(0))
+        Err(RtuError::InvalidQuantity(0))
     );
     assert_eq!(
-        build_read_request(0x01, 0x0000, MAX_READ_REGS as u16 + 1),
-        Err(FrameError::InvalidQuantity(MAX_READ_REGS + 1))
+        build_read_request(0x01, 0x0000, MAX_READ_REGS + 1),
+        Err(RtuError::InvalidQuantity(MAX_READ_REGS + 1))
     );
     assert_eq!(
         build_read_request(0, 0x0000, 1),
-        Err(FrameError::BroadcastRead)
+        Err(RtuError::BroadcastRead)
     );
 
     let mut empty = [];
     assert_eq!(
         parse_read_response(&[], 0x01, &mut empty),
-        Err(ModbusError::InvalidQuantity(0))
+        Err(RtuError::InvalidQuantity(0))
     );
     let mut oversized = [0u16; MAX_READ_REGS + 1];
     assert_eq!(
         parse_read_response(&[], 0x01, &mut oversized),
-        Err(ModbusError::InvalidQuantity(MAX_READ_REGS + 1))
+        Err(RtuError::InvalidQuantity(MAX_READ_REGS + 1))
     );
 }
 
 #[test]
 fn request_builders_validate_slave_addresses() {
     let cases = [
-        (0, Err(FrameError::BroadcastRead), true),
+        (0, Err(RtuError::BroadcastRead), true),
         (1, Ok(()), true),
         (247, Ok(()), true),
-        (248, Err(FrameError::InvalidSlaveAddress(248)), false),
-        (255, Err(FrameError::InvalidSlaveAddress(255)), false),
+        (248, Err(RtuError::InvalidSlaveAddress(248)), false),
+        (255, Err(RtuError::InvalidSlaveAddress(255)), false),
     ];
 
     for (slave, read_expected, write_valid) in cases {
@@ -324,7 +324,7 @@ fn response_prefix_selects_and_validates_adu_length() {
             0x01,
             ResponseShape::ReadHolding { register_count: 2 },
         ),
-        Err(ModbusError::BadHeader)
+        Err(RtuError::BadHeader)
     );
     assert_eq!(
         response_adu_len(
@@ -332,7 +332,7 @@ fn response_prefix_selects_and_validates_adu_length() {
             0x01,
             ResponseShape::ReadHolding { register_count: 2 },
         ),
-        Err(ModbusError::BadSlave(0x02))
+        Err(RtuError::BadSlave(0x02))
     );
 }
 
@@ -356,7 +356,7 @@ fn build_write_multiple_rejects_oversize_payload() {
     let oversized = std::vec![0u16; MAX_WRITE_REGS + 1];
     assert!(matches!(
         build_write_multiple_request(0x01, 0x0050, &oversized, &mut buf),
-        Err(FrameError::InvalidQuantity(n)) if n == MAX_WRITE_REGS + 1
+        Err(RtuError::InvalidQuantity(n)) if n == MAX_WRITE_REGS + 1
     ));
 }
 
@@ -367,7 +367,7 @@ fn parse_read_response_short_frame_is_short_response() {
     let mut out = [0u16; 1];
     assert!(matches!(
         parse_read_response(&frame, 0x01, &mut out),
-        Err(ModbusError::ShortResponse(3))
+        Err(RtuError::ShortResponse(3))
     ));
 }
 
@@ -391,7 +391,7 @@ fn parse_read_response_rejects_byte_count_mismatch() {
     let mut out = [0u16; 1];
     assert!(matches!(
         parse_read_response(&frame, 0x01, &mut out),
-        Err(ModbusError::BadHeader)
+        Err(RtuError::BadHeader)
     ));
 }
 
@@ -399,21 +399,21 @@ fn parse_read_response_rejects_byte_count_mismatch() {
 fn frame_error_display_strings() {
     use std::format;
     assert_eq!(
-        format!("{}", FrameError::InvalidQuantity(0)),
+        format!("{}", RtuError::InvalidQuantity(0)),
         "invalid register quantity 0"
     );
     assert_eq!(
-        format!("{}", FrameError::BroadcastRead),
+        format!("{}", RtuError::BroadcastRead),
         "read request cannot use broadcast address 0"
     );
     assert_eq!(
-        format!("{}", FrameError::InvalidSlaveAddress(248)),
+        format!("{}", RtuError::InvalidSlaveAddress(248)),
         "invalid Modbus slave address 248"
     );
     assert_eq!(
         format!(
             "{}",
-            FrameError::BufferTooSmall {
+            RtuError::BufferTooSmall {
                 needed: 15,
                 actual: 10,
             }
@@ -426,21 +426,21 @@ fn frame_error_display_strings() {
 fn modbus_error_display_strings() {
     use std::format;
     assert_eq!(
-        format!("{}", ModbusError::InvalidQuantity(0)),
+        format!("{}", RtuError::InvalidQuantity(0)),
         "invalid register quantity 0"
     );
     assert_eq!(
-        format!("{}", ModbusError::ShortResponse(3)),
+        format!("{}", RtuError::ShortResponse(3)),
         "short response (3 bytes)"
     );
     assert_eq!(
-        format!("{}", ModbusError::BadSlave(0x02)),
+        format!("{}", RtuError::BadSlave(0x02)),
         "wrong slave id 0x02"
     );
-    assert_eq!(format!("{}", ModbusError::BadHeader), "malformed header");
-    assert_eq!(format!("{}", ModbusError::BadCrc), "CRC mismatch");
+    assert_eq!(format!("{}", RtuError::BadHeader), "malformed header");
+    assert_eq!(format!("{}", RtuError::BadCrc), "CRC mismatch");
     assert_eq!(
-        format!("{}", ModbusError::Exception(0x03)),
+        format!("{}", RtuError::Exception(0x03)),
         "modbus exception 0x03"
     );
 }
@@ -453,7 +453,7 @@ fn parse_write_multiple_rejects_addr_mismatch() {
     frame[7] = (crc >> 8) as u8;
     assert!(matches!(
         parse_write_multiple_response(&frame, 0x01, 0x0050, 3),
-        Err(ModbusError::BadHeader)
+        Err(RtuError::BadHeader)
     ));
 }
 
@@ -464,7 +464,7 @@ fn parsers_reject_trailing_bytes() {
     let mut out = [0u16; 1];
     assert_eq!(
         parse_read_response(&read, 0x01, &mut out),
-        Err(ModbusError::BadHeader)
+        Err(RtuError::BadHeader)
     );
 
     let req = build_write_single_request(0x01, 0x0012, 1).unwrap();
@@ -472,7 +472,7 @@ fn parsers_reject_trailing_bytes() {
     write.push(0);
     assert_eq!(
         parse_write_single_response(&write, &req),
-        Err(ModbusError::BadHeader)
+        Err(RtuError::BadHeader)
     );
 }
 
@@ -482,7 +482,7 @@ fn parse_read_rejects_exception_for_another_function() {
     let mut out = [0u16; 1];
     assert_eq!(
         parse_read_response(&frame, 0x01, &mut out),
-        Err(ModbusError::BadHeader)
+        Err(RtuError::BadHeader)
     );
 }
 

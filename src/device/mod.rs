@@ -1,12 +1,11 @@
 //! High-level device API. One method per logical operation; all reads
 //! and writes go through the [`crate::transport::ModbusTransport`].
 
-pub(crate) mod error;
-
-use crate::device::error::{InputError, InputField, XyError};
+use crate::error::{InputError, InputField, XyError};
+use crate::framing;
 use crate::regs;
 use crate::regs::{DEFAULT_SLAVE, Encoding, GROUP_BASE, GROUP_COUNT, GROUP_LEN, Reg};
-use crate::transport::{ModbusTransport, RtuError};
+use crate::transport::ModbusTransport;
 use crate::types::enums::{BaudRate, ProtectionStatus, RegMode, TempUnit};
 use crate::types::group::GroupParams;
 use crate::types::status::{OnTime, SafetyLimits, Setpoints, Status, Temperature, Totals};
@@ -284,14 +283,6 @@ fn check_v_set_under_ovp(v_set: u16, ovp: u16) -> Result<(), InputError> {
     Ok(())
 }
 
-fn validate_slave(slave: u8) -> Result<(), InputError> {
-    if (1..=247).contains(&slave) {
-        Ok(())
-    } else {
-        Err(InputError::InvalidSlaveAddress { address: slave })
-    }
-}
-
 fn validate_group(group: u8) -> Result<(), InputError> {
     if group < GROUP_COUNT {
         Ok(())
@@ -329,22 +320,25 @@ impl<T: ModbusTransport> Xy<T> {
         }
     }
 
-    pub fn with_slave(transport: T, slave: u8) -> Result<Self, InputError> {
-        validate_slave(slave)?;
+    pub fn with_slave(transport: T, slave: u8) -> Result<Self, XyError> {
+        framing::validate_read_slave(slave)?;
         Ok(Self { transport, slave })
     }
 
     /// Read holding registers through the configured transport and slave.
     /// Empty destinations and slices longer than
-    /// [`crate::framing::MAX_READ_REGS`] return [`RtuError::InvalidQuantity`].
+    /// [`crate::framing::MAX_READ_REGS`] return [`crate::RtuError::InvalidQuantity`].
     /// Addresses come from [`Reg::addr`].
-    pub fn read_raw_holding(&mut self, addr: u16, dst: &mut [u16]) -> Result<(), RtuError> {
-        self.transport.read_holding(self.slave, addr, dst)
+    pub fn read_raw_holding(&mut self, addr: u16, dst: &mut [u16]) -> Result<(), XyError> {
+        self.transport.read_holding(self.slave, addr, dst)?;
+        Ok(())
     }
 
     /// Write one holding register through the configured transport and slave.
-    pub fn write_raw_holding(&mut self, addr: u16, value: u16) -> Result<(), RtuError> {
-        self.transport.write_single_holding(self.slave, addr, value)
+    pub fn write_raw_holding(&mut self, addr: u16, value: u16) -> Result<(), XyError> {
+        self.transport
+            .write_single_holding(self.slave, addr, value)?;
+        Ok(())
     }
 
     /// Consume the device and return the inner transport.
@@ -662,7 +656,7 @@ impl<T: ModbusTransport> Xy<T> {
     }
     /// Write a new slave address. Takes effect after the device resets.
     pub fn set_slave_address(&mut self, addr: u8) -> Result<(), XyError> {
-        validate_slave(addr)?;
+        framing::validate_read_slave(addr)?;
         self.write_word(Reg::SlaveAddr, addr as u16)
     }
 

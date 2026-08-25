@@ -5,8 +5,8 @@
 //! crate's `DATASHEET.md` for the full protocol reference.
 //!
 //! ```no_run
-//! # use xy_modbus::XyError;
-//! # use xy_modbus::transport::{ModbusTransport, RtuError};
+//! # use xy_modbus::{RtuError, XyError};
+//! # use xy_modbus::transport::ModbusTransport;
 //! # struct MyTransport;
 //! # impl ModbusTransport for MyTransport {
 //! #     fn read_holding(&mut self, _: u8, _: u16, _: &mut [u16]) -> Result<(), RtuError> { unimplemented!() }
@@ -52,6 +52,7 @@
 #![no_std]
 
 mod device;
+mod error;
 mod types;
 
 pub mod framing;
@@ -67,8 +68,8 @@ pub mod uart;
 #[cfg(all(feature = "esp-idf-hal", target_os = "espidf"))]
 pub mod esp_idf;
 
-pub use device::error::{InputError, InputField, XyError};
 pub use device::{ScaleCheck, Xy};
+pub use error::{InputError, InputField, IoErrorKind, IoOperation, RtuError, XyError};
 pub use types::enums::{BaudRate, ProtectionStatus, RegMode, TempUnit};
 pub use types::group::GroupParams;
 pub use types::status::{OnTime, SafetyLimits, Setpoints, Status, Temperature, Totals};

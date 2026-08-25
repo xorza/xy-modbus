@@ -3,7 +3,7 @@ use std::vec;
 use std::vec::Vec;
 
 use super::*;
-use crate::framing::ModbusError;
+use crate::error::RtuError;
 
 /// Scriptable transport for tests. Each script entry pairs a
 /// register-or-value request with a canned response or error.
@@ -1035,7 +1035,7 @@ fn rtu_error_propagates() {
     struct FailRead;
     impl ModbusTransport for FailRead {
         fn read_holding(&mut self, _: u8, _: u16, _: &mut [u16]) -> Result<(), RtuError> {
-            Err(RtuError::Modbus(ModbusError::BadCrc))
+            Err(RtuError::BadCrc)
         }
         fn write_single_holding(&mut self, _: u8, _: u16, _: u16) -> Result<(), RtuError> {
             unreachable!()
@@ -1047,7 +1047,7 @@ fn rtu_error_propagates() {
     let mut xy = Xy::new(FailRead);
     assert!(matches!(
         xy.read_voltage_out(),
-        Err(XyError::Rtu(RtuError::Modbus(ModbusError::BadCrc)))
+        Err(XyError::Rtu(RtuError::BadCrc))
     ));
 }
 
@@ -1055,7 +1055,9 @@ fn rtu_error_propagates() {
 fn invalid_inputs_fail_before_transport_io() {
     assert_eq!(
         Xy::with_slave(MockTransport::new(vec![]), 0).unwrap_err(),
-        InputError::InvalidSlaveAddress { address: 0 }
+        // An `Xy` slave must answer reads, so 0 is rejected as a broadcast
+        // address rather than as a merely out-of-range one.
+        XyError::Rtu(RtuError::BroadcastRead)
     );
 
     let mut xy = Xy::new(MockTransport::new(vec![]));
@@ -1077,12 +1079,21 @@ fn invalid_inputs_fail_before_transport_io() {
         xy.set_backlight(0),
         xy.set_backlight(6),
         xy.set_sleep_minutes(10),
-        xy.set_slave_address(0),
-        xy.set_slave_address(248),
         xy.recall_group(10),
     ] {
         assert!(matches!(result, Err(XyError::Input(_))));
     }
+
+    // A bad slave address is a Modbus-level fault rather than a value fault,
+    // so it reports the variant the transport would, not an `InputError`.
+    assert_eq!(
+        xy.set_slave_address(0),
+        Err(XyError::Rtu(RtuError::BroadcastRead))
+    );
+    assert_eq!(
+        xy.set_slave_address(248),
+        Err(XyError::Rtu(RtuError::InvalidSlaveAddress(248)))
+    );
 }
 
 #[test]

@@ -22,8 +22,9 @@
 use embedded_hal::delay::DelayNs;
 use embedded_io::Write;
 
-use crate::framing::{self, MAX_ADU, MAX_READ_REGS, MAX_WRITE_REGS, ResponseShape};
-use crate::transport::{IoErrorKind, IoOperation, ModbusTransport, RtuError};
+use crate::error::{IoErrorKind, IoOperation, RtuError};
+use crate::framing::{self, MAX_ADU, MAX_WRITE_REGS, ResponseShape};
+use crate::transport::ModbusTransport;
 
 // `write_multiple_holdings` builds the request frame into `self.buf` and
 // `expect`s success — sound only because the buffer fits the largest
@@ -223,22 +224,6 @@ fn is_interrupted<E: embedded_io::Error>(error: &E) -> bool {
     error.kind() == embedded_io::ErrorKind::Interrupted
 }
 
-fn validate_read_slave(slave: u8) -> Result<(), RtuError> {
-    if (1..=247).contains(&slave) {
-        Ok(())
-    } else {
-        Err(RtuError::InvalidSlaveAddress(slave))
-    }
-}
-
-fn validate_write_slave(slave: u8) -> Result<(), RtuError> {
-    if slave <= 247 {
-        Ok(())
-    } else {
-        Err(RtuError::InvalidSlaveAddress(slave))
-    }
-}
-
 fn write_all<U: Write>(uart: &mut U, mut buf: &[u8]) -> Result<(), RtuError> {
     while !buf.is_empty() {
         match uart.write(buf) {
@@ -304,13 +289,11 @@ where
     D: DelayNs,
 {
     fn read_holding(&mut self, slave: u8, addr: u16, dst: &mut [u16]) -> Result<(), RtuError> {
-        validate_read_slave(slave)?;
-        if dst.is_empty() || dst.len() > MAX_READ_REGS {
-            return Err(RtuError::InvalidQuantity(dst.len()));
-        }
-        let count = dst.len() as u16;
-        let req = framing::build_read_request(slave, addr, count)
-            .expect("slave and register quantity validated above");
+        // `build_read_request` validates the slave address and the register
+        // quantity and reports them as `RtuError`, so this layer does not
+        // re-check what the frame builder already rejects. It takes a `usize`
+        // so an oversized `dst` cannot wrap into a valid count.
+        let req = framing::build_read_request(slave, addr, dst.len())?;
 
         self.pre_tx_silence()?;
         write_all(&mut self.uart, &req)?;
@@ -329,9 +312,7 @@ where
     }
 
     fn write_single_holding(&mut self, slave: u8, addr: u16, value: u16) -> Result<(), RtuError> {
-        validate_write_slave(slave)?;
-        let req = framing::build_write_single_request(slave, addr, value)
-            .expect("slave address validated above");
+        let req = framing::build_write_single_request(slave, addr, value)?;
 
         self.pre_tx_silence()?;
         write_all(&mut self.uart, &req)?;
@@ -356,15 +337,10 @@ where
         addr: u16,
         values: &[u16],
     ) -> Result<(), RtuError> {
-        validate_write_slave(slave)?;
-        if values.is_empty() || values.len() > MAX_WRITE_REGS {
-            return Err(RtuError::InvalidQuantity(values.len()));
-        }
-
-        // Build request into self.buf, send it, then reuse the same
-        // buffer for the response — sequential, no aliasing.
-        let n = framing::build_write_multiple_request(slave, addr, values, &mut self.buf)
-            .expect("inputs validated above");
+        // Build request into self.buf, send it, then reuse the same buffer for
+        // the response — sequential, no aliasing. The builder validates the
+        // slave address and register quantity.
+        let n = framing::build_write_multiple_request(slave, addr, values, &mut self.buf)?;
 
         self.pre_tx_silence()?;
         write_all(&mut self.uart, &self.buf[..n])?;
