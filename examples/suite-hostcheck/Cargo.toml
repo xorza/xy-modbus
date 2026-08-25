@@ -1,0 +1,18 @@
+# Type-checks the on-device conformance suite on the host.
+#
+# It lives outside `esp32c6-test/` on purpose: that directory's
+# `.cargo/config.toml` forces `target = riscv32imac-esp-espidf` and
+# `build-std` on everything beneath it, which is exactly what this needs to
+# avoid. Run `esp32c6-test/check.sh`.
+[package]
+name = "xy-modbus-suite-hostcheck"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+xy-modbus = { path = "../.." }
+log = "0.4"
+
+# Standalone so the parent crate's cargo commands do not pick it up.
+[workspace]
