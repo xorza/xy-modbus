@@ -6,9 +6,8 @@
 //!   common ground.
 //!
 //! Everything the suite does — including its warnings about writing to the
-//! device — lives in [`suite`]. This file only builds the UART and hands over.
-
-mod suite;
+//! device — lives in `xy_modbus::selftest`. This file only builds the UART and
+//! hands over.
 
 use std::thread;
 use std::time::Duration;
@@ -20,7 +19,7 @@ use esp_idf_hal::uart::config::Config;
 use esp_idf_hal::units::Hertz;
 use log::info;
 
-use xy_modbus::Xy;
+use xy_modbus::{Xy, selftest};
 
 const BAUD: u32 = 115_200;
 
@@ -40,7 +39,8 @@ fn main() {
     )
     .expect("UART1 init");
 
-    let report = suite::run(Xy::from_esp_uart(uart), BAUD);
+    // Real firmware needs a moment to apply a write before it reads back.
+    let report = selftest::run(Xy::from_esp_uart(uart), BAUD, Duration::from_millis(50));
 
     // Nothing else to do on a microcontroller, and exiting `main` would reboot
     // into a run loop; park so the report stays on the monitor.

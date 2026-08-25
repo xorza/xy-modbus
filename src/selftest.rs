@@ -1,8 +1,14 @@
 //! Hardware conformance suite for the XY7025, generic over the transport.
 //!
-//! Nothing here mentions the ESP32 — `main.rs` owns the bootstrap and hands in
-//! a built [`Xy`]. Keeping the suite transport-generic means it type-checks on
-//! a host against any mock, instead of only when flashed.
+//! Behind the `selftest` feature, which pulls in `std` and `log` — this is
+//! bring-up equipment, not something to run in a `no_std` control loop. Point
+//! it at your own [`Xy`] and it reports what the device does against what
+//! `DATASHEET.md` says it should.
+//!
+//! Nothing here is ESP32-specific; `examples/esp32c6-test/` is only a
+//! bootstrap that builds a UART and calls [`run`]. The crate's own
+//! `tests/on_device_suite.rs` runs the same code against a simulated device,
+//! so it stays honest as the driver changes.
 //!
 //! **This suite writes to the device.** It snapshots every persistent register
 //! as raw words, restores them exactly at the end, and leaves the live output
@@ -11,14 +17,19 @@
 //! are only ever written back to their current values — changing either would
 //! orphan the device on its next boot.
 
+// `extern crate std` in `lib.rs` links std for this module, but a `no_std`
+// crate has no std prelude, so the alloc types come in by name.
+use std::format;
+use std::string::{String, ToString};
 use std::thread;
 use std::time::Duration;
+use std::vec::Vec;
 
 use log::{error, info, warn};
 
-use xy_modbus::regs::{Group, Reg};
-use xy_modbus::transport::ModbusTransport;
-use xy_modbus::{
+use crate::regs::{Group, Reg};
+use crate::transport::ModbusTransport;
+use crate::{
     GroupParams, InputError, ProtectionStatus, SafetyLimits, Setpoints, TempUnit, Temperature, Xy,
     XyError,
 };
@@ -51,6 +62,14 @@ fn driver(r: Result<(), XyError>) -> Outcome {
 
 fn fail(message: impl Into<String>) -> Failure {
     Failure(message.into())
+}
+
+/// Give the device time to apply a write. Zero means "no wait" — a simulated
+/// device applies writes instantly, so the host test does not pay for it.
+fn settle_for(delay: Duration) {
+    if !delay.is_zero() {
+        thread::sleep(delay);
+    }
 }
 
 /// Two live reads of the same quantity are taken at different instants, so a
@@ -500,7 +519,7 @@ fn protection_status<T: ModbusTransport>(xy: &mut Xy<T>) -> Outcome {
     )
 }
 
-fn output_enable<T: ModbusTransport>(xy: &mut Xy<T>) -> Outcome {
+fn output_enable<T: ModbusTransport>(xy: &mut Xy<T>, settle: Duration) -> Outcome {
     xy.set_output(false)?;
     xy.set_voltage(0.0)?;
     xy.set_current_limit(0.0)?;
@@ -509,7 +528,7 @@ fn output_enable<T: ModbusTransport>(xy: &mut Xy<T>) -> Outcome {
     let body = (|| -> Outcome {
         for want in [true, false] {
             xy.set_output(want)?;
-            thread::sleep(Duration::from_millis(100));
+            settle_for(settle * 2);
             check("OUTPUT_EN", want, xy.read_output()?)?;
             check("status.output_on", want, xy.read_status()?.output_on)?;
         }
@@ -671,9 +690,7 @@ fn raw_probe<T: ModbusTransport>(
     let body = (|| -> Outcome {
         for &written in probes {
             xy.write_word(reg, written)?;
-            if !settle.is_zero() {
-                thread::sleep(settle);
-            }
+            settle_for(settle);
             check(
                 &format!("{label} wrote {written}"),
                 expected(written, original),
@@ -726,13 +743,13 @@ fn temp_offset_writes_ignored<T: ModbusTransport>(xy: &mut Xy<T>) -> Outcome {
 }
 
 /// Firmware caps SLEEP at nine minutes; anything above reads back as 9.
-fn sleep_ceiling<T: ModbusTransport>(xy: &mut Xy<T>) -> Outcome {
+fn sleep_ceiling<T: ModbusTransport>(xy: &mut Xy<T>, settle: Duration) -> Outcome {
     raw_probe(
         xy,
         "SLEEP",
         Reg::Sleep,
         &[0, 1, 8, 9, 10, 11, 30, 60, 999],
-        Duration::from_millis(50),
+        settle,
         |written, _| written.min(9),
     )
 }
@@ -904,7 +921,7 @@ fn lifecycle<T: ModbusTransport>(xy: Xy<T>) -> Outcome {
 
 /// Run the whole suite against `xy`, leaving the device as it was found with
 /// the output off. `expected_baud` is what the caller configured its UART for.
-pub fn run<T: ModbusTransport>(mut xy: Xy<T>, expected_baud: u32) -> Report {
+pub fn run<T: ModbusTransport>(mut xy: Xy<T>, expected_baud: u32, settle: Duration) -> Report {
     let mut report = Report::default();
 
     let snapshot = match Snapshot::capture(&mut xy) {
@@ -927,7 +944,7 @@ pub fn run<T: ModbusTransport>(mut xy: Xy<T>, expected_baud: u32) -> Report {
     }
 
     type Test<T> = fn(&mut Xy<T>) -> Outcome;
-    let tests: [(&str, Test<T>); 14] = [
+    let tests: [(&str, Test<T>); 13] = [
         ("identity", identity),
         (
             "status_agrees_with_granular_reads",
@@ -938,7 +955,6 @@ pub fn run<T: ModbusTransport>(mut xy: Xy<T>, expected_baud: u32) -> Report {
         ("protection_sweep", protection_sweep),
         ("crossing_guards", crossing_guards),
         ("protection_status", protection_status),
-        ("output_enable", output_enable),
         ("flags", flags),
         ("temperature", temperature),
         ("display_settings", display_settings),
@@ -949,9 +965,10 @@ pub fn run<T: ModbusTransport>(mut xy: Xy<T>, expected_baud: u32) -> Report {
     for (name, test) in tests {
         report.record(name, test(&mut xy));
     }
-    // Kept out of the table because they need an extra argument or must run in
-    // a particular order relative to the restore below.
-    report.record("sleep_ceiling", sleep_ceiling(&mut xy));
+    // Kept out of the table because they take an extra argument, or must run
+    // in a particular order relative to the restore below.
+    report.record("output_enable", output_enable(&mut xy, settle));
+    report.record("sleep_ceiling", sleep_ceiling(&mut xy, settle));
     report.record("backlight_floor", backlight_floor(&mut xy));
     report.record("comms", comms(&mut xy, expected_baud));
     report.record("group_round_trip", group_round_trip(&mut xy));

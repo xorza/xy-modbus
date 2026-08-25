@@ -78,6 +78,26 @@ The bundled defaults also bound quiet-bus acquisition to ten intervals (about
 | `embedded-io` | yes     | Bundled `uart::UartTransport` over `uart::BlockingRead + embedded_io::Write`. |
 | `esp-idf-hal` | no      | `Xy::from_esp_uart` constructor for `esp_idf_hal::UartDriver`.                |
 | `defmt`       | no      | `defmt::Format` derives on public types.                                      |
+| `selftest`    | no      | `selftest::run` hardware conformance suite. Pulls in `std` and `log`.        |
+
+## Conformance suite
+
+The `selftest` feature ships the suite used to characterise the XY7025 in the
+first place. Point it at your own transport and it exercises every public
+method, checks each documented firmware quirk, and reports what disagrees:
+
+```rust,ignore
+let report = xy_modbus::selftest::run(xy, 115_200, Duration::from_millis(50));
+```
+
+**It writes to the device.** Every persistent register is snapshotted as raw
+words and restored at the end, and the output is briefly enabled at V=0 / I=0
+to prove the on/off path — so disconnect sensitive loads first. Baud rate and
+slave address are only ever rewritten to their current values.
+
+`tests/on_device_suite.rs` runs the same suite against a simulated XY7025, so
+it keeps compiling and passing as the driver changes rather than only being
+checked when someone flashes a board.
 
 ## Boot / safety policy
 

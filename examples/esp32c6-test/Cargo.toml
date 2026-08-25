@@ -20,7 +20,7 @@ opt-level = "z"
 [workspace]
 
 [dependencies]
-xy-modbus = { path = "../..", features = ["esp-idf-hal"] }
+xy-modbus = { path = "../..", features = ["esp-idf-hal", "selftest"] }
 log = "0.4.29"
 esp-idf-svc = "0.52.1"
 esp-idf-hal = "0.46.2"

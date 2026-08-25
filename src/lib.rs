@@ -55,6 +55,14 @@ mod device;
 mod error;
 mod types;
 
+// The self-test suite formats messages and collects failures, so it needs an
+// allocator and a clock. Opt-in, and the crate stays `no_std` without it.
+#[cfg(feature = "selftest")]
+extern crate std;
+
+#[cfg(feature = "selftest")]
+pub mod selftest;
+
 pub mod framing;
 pub mod regs;
 pub mod transport;
